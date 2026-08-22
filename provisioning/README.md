@@ -52,10 +52,13 @@ ISUCON14の競技環境を構築するための構成管理・プロビジョニ
 - **`setup.sh`**: 上記を一連の流れで自動実行するオーケストレーションスクリプト。
 - **`cleanup.sh`**: 作成したAWSリソース（Terraform管理）の破棄とローカル一時ファイル・Dockerイメージの削除を行うクリーンアップスクリプト。
 - **`run_benchmark.sh`**: 指定した競技者向けにFargateベンチマークタスクを起動し、終了を待機した上でCloudWatch Logsのログをローカルにダウンロードするスクリプト。
+- **`deploy_webapp.sh`**: ローカルの`webapp/go`を指定した競技者EC2に`rsync`で反映し、リモートでビルド・`isuride-go`再起動まで行うデプロイスクリプト。
 
 ```sh
 ./provisioning/run_benchmark.sh contestant-01
 # ログは provisioning/terraform/generated/logs/contestant-01-<taskID>.log に保存されます
+
+./provisioning/deploy_webapp.sh contestant-01
 ```
 
 ## 留意事項

@@ -146,6 +146,14 @@ allowed_https_cidrs = ["203.0.113.10/32"]
 
 SSHユーザーは `ubuntu` です。ログイン後は `sudo su - isucon` で `isucon` ユーザーに切り替えて作業してください。
 
+## ローカルのwebapp/goをEC2に反映する
+
+ローカルの`webapp/go`を編集して、そのままEC2に反映・再起動したい場合は`../deploy_webapp.sh`が使えます。`rsync`でファイルを同期し、リモートでビルドして`isuride-go`を再起動します。
+
+```sh
+../deploy_webapp.sh contestant-01
+```
+
 ## 削除（片付け）
 
 一括クリーンアップスクリプトを使用する場合:
