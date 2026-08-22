@@ -1,0 +1,11 @@
+# aws_profile = "your-aws-profile"
+
+# setup.sh generates and registers an SSH key automatically. To use an existing
+# EC2 key pair instead, set its name here.
+# key_name = "your-existing-key-pair"
+
+# setup.sh automatically restricts SSH to your current public IPv4 address.
+# allowed_ssh_cidrs = ["203.0.113.10/32"]
+
+# Add your public IP only when browser access to contestant HTTPS is needed.
+# allowed_https_cidrs = ["203.0.113.10/32"]

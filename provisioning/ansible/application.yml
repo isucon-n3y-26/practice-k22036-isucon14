@@ -1,8 +1,13 @@
 ---
 - hosts: application
   roles:
+    - base
+    - apt
+    - isucon-user
     - isuadmin-user
+    - xbuild
     - mysql
     - nginx
     - envcheck
     - webapp
+

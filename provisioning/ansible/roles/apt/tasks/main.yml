@@ -6,6 +6,7 @@
     regexp: "http://archive.ubuntu.com/ubuntu"
     replace: "http://ftp.jaist.ac.jp/pub/Linux/ubuntu/"
     backup: yes
+  ignore_errors: true
 
 - name: Update apt cache
   become: true

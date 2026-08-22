@@ -1,55 +1,79 @@
-# AMIをビルドするスクリプト
+# プロビジョニング
 
-# 手動でのビルド手順
+ISUCON14の競技環境を構築するための構成管理・プロビジョニングツール群です。
 
-AMIイメージは
+## 1コマンド自動セットアップ（`setup.sh`）
 
-- 各言語の実行環境を含むベースイメージ
-- アプリケーションコードを含む競技イメージ
+`provisioning/setup.sh` を実行することで、Terraformによるインフラ構築、ベンチマーカーのビルド＆ECR push、Ansibleによる競技者EC2のプロビジョニングを一括で実行できます。
 
-の2つに別れています。
-
-競技イメージはベースイメージをソースにビルドを実行するため、作成するAWS環境にベースイメージが存在しない場合、必ず一度ベースイメージの作成を実行する必要があります。  
-実行環境に修正を加えた場合も手動で再度ベースイメージのビルドが必要になります。  
-(所要時間20分程度かかる可能性があります)
-
-ベースイメージを作成後、アプリケーションコードの変更のみ反映したい場合は競技イメージのビルドのみを行うことが出来ます。
-
-```
-# AMIを作成するAWS環境にログイン
-aws --profile ${aws_env} sso login
-
-# ビルド実行(ベースイメージ)
-cd provisioning/packer
-make base-build
-
-# ビルド実行(アプリケーション)
-cd provisioning/packer
-make
+```sh
+./provisioning/setup.sh
 ```
 
-## 前提条件
+### `setup.sh` の内部処理フロー
 
-以下のものがインストールされていること
-- packer
-- go-task (バックエンドのビルドのため)
-- pnpm (フロントのビルドのため)
+1. **前提ツールの検証**:
+   - `aws`, `terraform`, `ansible`, `ansible-playbook`, `docker`, `go`, `node`, `pnpm`, `task`, `make`, `jq`, `curl`, `ssh-keygen` がインストールされているか、Dockerデーモンが起動しているかをチェックします。
+2. **SSH鍵の自動生成**:
+   - `provisioning/terraform/.keys/isucon14_ed25519` を自動生成し、Terraformの変数経由でEC2の公開鍵として登録します。
+3. **作業元IPアドレスの自動制限**:
+   - 実行マシンのパブリックIPv4アドレスを自動取得し、EC2のSSH接続許可CIDRに設定します。
+4. **成果物ビルド（Ansible用）**:
+   - `provisioning/ansible/make_latest_files.sh` を呼び出し、フロントエンドのアセットビルド、ベンチマーカーバイナリ作成、`webapp.tar.gz` アーカイブの生成を行います。
+5. **Fargate用ベンチマーカーDockerイメージのビルド**:
+   - `bench/Dockerfile.fargate` を元に `linux/amd64` 向けイメージをローカルでビルドします。
+6. **Terraform によるAWSインフラ構築**:
+   - `terraform init` および `terraform apply` を実行し、VPC、ECR、ECS Fargateタスク定義、および公式Ubuntu 24.04 AMIのEC2（3台）を作成します。
+7. **ECRへのベンチマーカーイメージPush**:
+   - ECRへログインし、手順5でビルドしたイメージをプッシュします。
+8. **EC2起動・初期化待機**:
+   - Terraformのアウトプットから自動でAnsibleインベントリ（`provisioning/terraform/generated/inventory.ini`）を生成し、EC2のSSH接続可能状態および `cloud-init` の完了を待機します。
+9. **Ansibleによる競技者環境プロビジョニング**:
+   - `provisioning/ansible/application.yml` を実行し、Go 1.23.2のインストール、MySQL/Nginxの設定、DB初期化、各systemdサービス（`isuride-go`, `isuride-matcher`, `isuride-payment_mock`）の起動まで一貫して完了させます。
+10. **ベンチマーク実行コマンドの案内**:
+    - 完了後、すぐにベンチマークを実行できるコマンドを出力します。
 
-# 留意事項
+詳細はルートの [README.md](../README.md) も参照してください。
 
-- CIは動作未確認のためまだ動かないようにしてあります
-- 作問合宿用の暫定として `trial.isucon14.net` の自己証明書を含んでいます
+## 1コマンド自動クリーンアップ（`cleanup.sh`）
 
-## フロントエンド
-`frontend/Makefile` に依存
-`pnpm run build` した結果の `build/client` 以下のファイルをnginxのディレクトリにデプロイしています
+環境を破棄してすべてのAWSリソースおよび一時ファイルを削除するには、以下を実行します。
 
-## API
-現時点で `/api`, `/app`, `/provider`, `/chair` 宛のリクエストが 8080にproxyされるようにnginxが構成されています
-エンドポイントの増減がある場合はnginxの設定ファイルの修正が必要です
+```sh
+./provisioning/cleanup.sh
+# または確認プロンプトをスキップして即時破棄
+./provisioning/cleanup.sh -y
+```
 
-APIサーバの動作に必要な環境変数は `provisioning/ansible/roles/isucon-user/templates/env.sh` で定義しています
+## コンポーネント構成
 
-## DB
-初期化処理として `webapp/sql/init.sh` を流しています
-初期化したい処理が追加になった場合は修正が必要です
+- **`terraform/`**: AWSリソース（EC2 3台、VPC、ECR、ECS Fargateベンチマーカーなど）を定義するTerraformモジュール。詳細は [`terraform/README.md`](terraform/README.md) を参照。
+- **`ansible/`**: 競技者環境およびベンチマーカー環境のプロビジョニング用Playbook/Role。詳細は [`ansible/README.md`](ansible/README.md) を参照。
+- **`setup.sh`**: 上記を一連の流れで自動実行するオーケストレーションスクリプト。
+- **`cleanup.sh`**: 作成したAWSリソース（Terraform管理）の破棄とローカル一時ファイル・Dockerイメージの削除を行うクリーンアップスクリプト。
+- **`run_benchmark.sh`**: 指定した競技者向けにFargateベンチマークタスクを起動し、終了を待機した上でCloudWatch Logsのログをローカルにダウンロードするスクリプト。
+
+```sh
+./provisioning/run_benchmark.sh contestant-01
+# ログは provisioning/terraform/generated/logs/contestant-01-<taskID>.log に保存されます
+```
+
+## 留意事項
+
+- 作問・検証用の暫定として `trial.isucon14.net` の自己署名証明書を含んでいます。
+- `setup.sh` は生成したSSH公開鍵と実行元のパブリックIPを `provisioning/terraform/setup.auto.tfvars.json`（Git管理対象外）に書き出します。これにより、`setup.sh` 実行後に別シェルで `terraform plan`/`apply`/`destroy` を手動実行した場合でも、キーペアやSSH許可CIDRの意図しない差分（削除）が発生しません。
+
+### フロントエンド
+
+`frontend/Makefile` に依存し、`pnpm run build` した結果（`frontend/dist` 等）をビルド成果物としてデプロイしています。
+
+### API
+
+`/api`, `/app`, `/provider`, `/chair` 宛のリクエストが 8080 にproxyされるようにnginxが構成されています。
+APIサーバの動作に必要な環境変数は `provisioning/ansible/roles/isucon-user/templates/env.sh` で定義されています。
+
+### DB
+
+初期化処理として `webapp/sql/init.sh` を実行します。
+初期化処理に変更や追加がある場合は修正が必要です。
+
