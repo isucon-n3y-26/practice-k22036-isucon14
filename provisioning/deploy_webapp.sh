@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# ISUCON14 webapp (Go) デプロイスクリプト
+# ISUCON14 webapp (Go) & nginx 設定デプロイスクリプト
 #
 # 【概要】
 # ローカルの webapp/go をソースの正として、指定した競技者EC2の
 # /home/isucon/webapp/go に rsync で反映し、リモートでビルドして
 # isuride-go サービスを再起動します。
+#
+# あわせて webapp/nginx/conf.d/ をEC2の /etc/nginx/conf.d/ に同期し、
+# nginx -t の後に nginx を reload します。
 #
 # 【使用方法】
 #   ./provisioning/deploy_webapp.sh <contestant-01|contestant-02|contestant-03>
@@ -17,6 +20,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TERRAFORM_DIR="${ROOT_DIR}/provisioning/terraform"
 SSH_PRIVATE_KEY_PATH="${SSH_PRIVATE_KEY_PATH:-${TERRAFORM_DIR}/.keys/isucon14_ed25519}"
 REMOTE_WEBAPP_GO_DIR="/home/isucon/webapp/go"
+REMOTE_NGINX_CONF_D_DIR="/etc/nginx/conf.d"
 
 TARGET="${1:-}"
 
@@ -71,14 +75,25 @@ rsync -az --delete \
   "${ROOT_DIR}/webapp/go/" "ubuntu@${PUBLIC_IP}:${REMOTE_WEBAPP_GO_DIR}/"
 
 # ------------------------------------------------------------------------------
-# 4. リモートでビルドし、isuride-go を再起動
+# 4. webapp/nginx/conf.d を /etc/nginx/conf.d に同期（root所有のため
+#    リモート側のrsyncをsudoで実行する）
+# ------------------------------------------------------------------------------
+printf '\n==> Syncing nginx conf.d to %s (%s)\n' "${TARGET}" "${PUBLIC_IP}"
+rsync -az --delete \
+  -e "ssh ${SSH_OPTS[*]}" \
+  --rsync-path="sudo rsync" \
+  "${ROOT_DIR}/webapp/nginx/conf.d/" "ubuntu@${PUBLIC_IP}:${REMOTE_NGINX_CONF_D_DIR}/"
+
+# ------------------------------------------------------------------------------
+# 5. リモートでビルドし、isuride-go を再起動・nginx をリロード
 # ------------------------------------------------------------------------------
 printf '\n==> Building and restarting isuride-go\n'
 ssh "${SSH_OPTS[@]}" "ubuntu@${PUBLIC_IP}" bash -s <<REMOTE_SCRIPT
 set -Eeuo pipefail
 sudo -u isucon /home/isucon/local/golang/bin/go build -C "${REMOTE_WEBAPP_GO_DIR}" -o "${REMOTE_WEBAPP_GO_DIR}/isuride" -ldflags "-s -w"
 sudo systemctl restart isuride-go
+sudo nginx -t && sudo systemctl reload nginx
 sudo systemctl --no-pager --full status isuride-go | head -n 5
 REMOTE_SCRIPT
 
-printf '\nDeployed webapp/go to %s.\n\n' "${TARGET}"
+printf '\nDeployed webapp/go and nginx conf.d to %s.\n\n' "${TARGET}"
