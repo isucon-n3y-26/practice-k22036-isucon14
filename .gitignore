@@ -1,3 +1,13 @@
 _tmp
 webapp/public
 .DS_Store
+
+# Terraform local files
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.auto.tfvars.json
+crash.log
+**/.keys/*
+provisioning/terraform/generated/*

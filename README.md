@@ -7,7 +7,7 @@
 
 ## ディレクトリ構成
 
-```
+```txt
 .
 +- bench          # ベンチマーカー
 +- browsercheck   # ブラウザチェック用スクリプト
@@ -15,7 +15,7 @@
 +- docs           # ドキュメント類
 +- envcheck       # 競技環境の確認用プログラム
 +- frontend       # 問題アプリケーションのフロントエンド
-+- provisioning   # Ansible および Packer
++- provisioning   # Terraform, Ansible, 一括セットアップスクリプト
 +- webapp         # リファレンス実装
 ```
 
@@ -28,63 +28,98 @@ ISUCON14で使用したTLS証明書は`provisioning/ansible/roles/nginx/files/et
 ## ISUCON14で使用した競技環境
 
 - 競技者 VM 3台
-  - InstanceType: c5.large (2vCPU, 4GiB Mem)
+  - InstanceType: c5.large (2vCPU, 4GiB Mem) ※Terraform練習環境ではコスト削減のため c6a.large をデフォルト設定
   - VolumeType: gp3 20GB
 - ベンチマーカー VM 1台
-  - ECS Fargate (8vCPU, 8GB Mem)
+  - ECS Fargate (8vCPU, 8GB Mem) ※Terraform練習環境では16GB Mem
 
 ## AWS上での過去問環境の構築方法
 
-### 用意されたAMIを利用する場合
+### 一括自動セットアップ（推奨）
 
-以下の設定で起動してください。このAMIは予告なく利用できなくなる可能性があります。
-- リージョン: `ap-northeast-1`
-- AMI-ID: `ami-0e334c50145a3ee41`
+`./provisioning/setup.sh` を実行することで、Terraformによるインフラ構築（EC2 3台、VPC、ECR、ECS Fargateベンチマーカー定義など）、ベンチマーカーイメージのECR push、およびAnsibleによる競技者環境のプロビジョニングを1コマンドで一括実行できます。
 
-### 自分でAMIをビルドする場合
+#### 前提条件
 
-上記AMIが利用できなくなった場合は、`provisioning/packer`以下で`make build`を実行するとAMIをビルドできます。`hasicorp/packer`が必要です。(運営時に検証したバージョンはv1.11.2)
-上記スクリプトではAnsibleを利用して環境構築を行っています。デフォルトでは、初期状態に含まれるすべての言語環境をビルドするため、時間がかかります。下記の[Ansibleでの環境構築 - 対象言語の絞り込み](#)の項目も確認してください。
+ローカル環境に以下のコマンド・ランタイムがインストールされている必要があります。
 
-### AMIからEC2を起動する場合の注意事項
+- `aws` (AWS CLI: 認証情報が設定済みであること)
+- `terraform` (v1.5以上)
+- `ansible`, `ansible-playbook`
+- `docker` (Docker Desktop等、デーモンが起動していること)
+- `go`
+- `node`, `pnpm`
+- `task` ([Taskfile](https://taskfile.dev/))
+- `make`
+- `jq`
+- `curl`, `ssh-keygen`
 
-- 起動に必要なEBSのサイズは最低16GBですが、ベンチマーク中にログなどが増えると溢れる可能性があるため、大きめに設定することをお勧めします(競技環境では20GiB)
-- セキュリティグループは`TCP/443`、`TCP/22`を開放してください
-- 適切なインスタンスプロファイルを設定することで、セッションマネージャーによる接続が可能です
-- 起動時に指定したキーペアを使って`ubuntu`ユーザーでSSH接続することが可能です
-  - その後`sudo su - isucon`で`isucon`ユーザーに切り替えてください
-
-## Ansibleでの環境構築
-
-ubuntu 24.04 の環境に対して Ansible を実行することで環境構築が可能です。
-
-`make_latest_files.sh`ではフロントエンドおよび、ベンチマーカーのビルドが行われます。 Node.JSと、Go言語のランタイムが必要となることに注意してください。
-
-### 競技者環境の構築
-
-使用したいサーバーに本リポジトリを`git clone`して、以下のコマンドを実行してください。
+#### 実行コマンド
 
 ```sh
-$ cd provisioning/ansible
-$ ./make_latest_files.sh # 各種ビルド
-$ ansible-playbook -i inventory/localhost application.yml
+./provisioning/setup.sh
 ```
 
-### ベンチマーカー環境の構築
-
-使用したいサーバーに本リポジトリを`git clone`して、以下のコマンドを実行してください。
+セットアップが完了すると、ベンチマーク実行コマンドが表示されます。ベンチマークタスクの起動・終了待機・ログのダウンロードまでを1コマンドで行う `run_benchmark.sh` の利用を推奨します。
 
 ```sh
-$ cd provisioning/ansible
-$ ./make_latest_files.sh # 各種ビルド
-$ ansible-playbook -i inventory/localhost benchmark.yml
+./provisioning/run_benchmark.sh contestant-01
+# ログは provisioning/terraform/generated/logs/ 以下に保存されます
 ```
 
-### 対象言語の絞り込み
+タスクの起動だけを手動で行いたい場合は以下のコマンドも使えます（詳細は [`provisioning/terraform/README.md`](provisioning/terraform/README.md) 参照）。
 
-デフォルトでは、初期状態に含まれるすべての言語環境をビルドするため、時間がかかります。
+```sh
+cd provisioning/terraform
+sh -c "$(terraform output -json benchmark_commands | jq -r '.["contestant-01"]')"
+```
 
-`provisioning/ansible/roles/xbuildwebapp/tasks/main.yml`および`provisioning/ansible/roles/webapp/tasks/main.yaml`で必要の無い言語をコメントアウトすることで、ビルド時間を短縮することができます。
+---
+
+### Ubuntu ＋ Ansible 方式の注意点・ポイント
+
+1. **公式Ubuntu 24.04 AMIの自動利用**
+   - 独自の事前ビルドAMI（Packer）を必要とせず、Canonical公式のUbuntu 24.04 LTS AMI（SSM Parameter経由）から起動してAnsibleで直接プロビジョニングを行います。
+2. **Go言語への絞り込み（高速プロビジョニング）**
+   - 本構成ではセットアップ時間短縮のため、対象言語を **Go言語** に絞り込んでプロビジョニングを行います（Node.js, Python, Ruby, Rust, Perl, PHP等のビルドはスキップされます）。
+   - 他の言語を使用したい場合は、`provisioning/ansible/roles/xbuildwebapp/tasks/main.yml` および `provisioning/ansible/roles/webapp/tasks/main.yaml` 内の該当タスクのコメントアウトを解除してください。
+3. **SSH接続とセキュリティ設定**
+   - `setup.sh` 実行時に、作業マシンのグローバルIPv4アドレスを自動取得してEC2のセキュリティグループ（SSH接続元許可）に設定します。
+   - 専用のSSH鍵が `provisioning/terraform/.keys/isucon14_ed25519` に自動生成されます。
+   - AWS Systems Manager (SSM) Session Manager経由の接続（`terraform output ssm_commands`）も可能です。
+4. **SSHユーザーと権限**
+   - EC2接続時のログインユーザーは `ubuntu` です。
+   - アプリケーションの操作やコード編集を行う際は、`sudo su - isucon` で `isucon` ユーザーに切り替えて作業してください。
+5. **クラウド初期化（cloud-init）待機**
+   - EC2起動直後のOS初期化処理が完了するまでAnsible側で待機処理（`cloud-init status --wait`）を行います。
+6. **リソースの削除（片付け）**
+   - 練習終了後は、不要な課金を防ぐために一括クリーンアップスクリプトまたは Terraform でリソースを破棄してください。
+
+     ```sh
+     ./provisioning/cleanup.sh
+     # または確認スキップ
+     ./provisioning/cleanup.sh -y
+     ```
+
+---
+
+## 既存サーバーへの直接Ansible適用
+
+AWS EC2以外のUbuntu 24.04環境（ローカルVMや他クラウド）に対して直接セットアップを行う場合は、以下のようにAnsibleを実行してください。
+
+```sh
+cd provisioning/ansible
+./make_latest_files.sh # フロントエンドおよびベンチマーカーのビルド
+ansible-playbook -i inventory/localhost application.yml
+```
+
+ベンチマーカーを構築する場合:
+
+```sh
+ansible-playbook -i inventory/localhost benchmark.yml
+```
+
+---
 
 ## docker compose での環境構築（Go/Perl言語のみ）
 
@@ -93,23 +128,26 @@ $ ansible-playbook -i inventory/localhost benchmark.yml
 [Task](https://taskfile.dev/)を使用するので、事前にインストールしておいてください。
 
 ### アプリケーションの起動
-```
-$ task up
-$ task go:run
+
+```sh
+task up
+task go:run
 ```
 
 ### 負荷走行の実行
 
 同一サーバー内でアプリケーションを起動している場合は、以下のコマンドで負荷走行を実行できます。
-```
-$ cd bench
-$ task run-local
+
+```sh
+cd bench
+task run-local
 ```
 
 異なるホストに向けて負荷走行を行う場合は、以下のようなコマンドで負荷走行を実行できます。
-```
-$ cd bench
-$ go run . run --target http://{{ 対象のIPアドレス }}:{{ 対象のポート番号 }} --payment-url http://{{ 対象のホストから見たベンチマーカーのIPアドレス }}:{{ 決済サーバーのポート番号 デフォルト:12345 }} -t 60
+
+```sh
+cd bench
+go run . run --target http://{{ 対象のIPアドレス }}:{{ 対象のポート番号 }} --payment-url http://{{ 対象のホストから見たベンチマーカーのIPアドレス }}:{{ 決済サーバーのポート番号 デフォルト:12345 }} -t 60
 ```
 
 ベンチマーカーは負荷走行の実行中に決済サーバーとしても動作します。`--payment-url` は問題アプリケーションへ決済サーバーのURLを通知するためのオプションです。
