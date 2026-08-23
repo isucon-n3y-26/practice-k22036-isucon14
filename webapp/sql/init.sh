@@ -50,3 +50,27 @@ FROM (SELECT chair_id,
              ABS(longitude - LAG(longitude) OVER (PARTITION BY chair_id ORDER BY created_at)) AS distance
       FROM chair_locations) tmp
 GROUP BY chair_id"
+
+# ==============================================================================
+# デバッグ用設定（本番計測時は無効）
+# webapp/sql/profiling.enabled ファイルの有無で切り替える
+# 有効化: touch webapp/sql/profiling.enabled && ./provisioning/deploy_webapp.sh <target>
+# 無効化: rm webapp/sql/profiling.enabled && ./provisioning/deploy_webapp.sh <target>
+# ==============================================================================
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -f "${SCRIPT_DIR}/profiling.enabled" ]; then
+	# スロークエリログを有効化（0.1秒以上のクエリを記録）
+	mysql -u"$ISUCON_DB_USER" \
+			-p"$ISUCON_DB_PASSWORD" \
+			--host "$ISUCON_DB_HOST" \
+			--port "$ISUCON_DB_PORT" \
+			-e "SET GLOBAL slow_query_log = ON;
+SET GLOBAL slow_query_log_file = '/var/log/mysql/slow.log';
+SET GLOBAL long_query_time = 0.1"
+else
+	mysql -u"$ISUCON_DB_USER" \
+			-p"$ISUCON_DB_PASSWORD" \
+			--host "$ISUCON_DB_HOST" \
+			--port "$ISUCON_DB_PORT" \
+			-e "SET GLOBAL slow_query_log = OFF"
+fi

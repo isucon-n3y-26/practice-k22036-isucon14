@@ -18,6 +18,8 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TERRAFORM_DIR="${ROOT_DIR}/provisioning/terraform"
 DEFAULT_LOG_DIR="${TERRAFORM_DIR}/generated/logs"
+SSH_PRIVATE_KEY_PATH="${SSH_PRIVATE_KEY_PATH:-${TERRAFORM_DIR}/.keys/isucon14_ed25519}"
+SLOW_QUERY_LOG_PATH="/var/log/mysql/slow.log"
 
 TARGET="${1:-}"
 LOG_DIR="${2:-${DEFAULT_LOG_DIR}}"
@@ -68,8 +70,25 @@ CLUSTER_ARN="$(terraform -chdir="${TERRAFORM_DIR}" output -raw benchmarker_ecs_c
 LOG_GROUP_NAME="$(terraform -chdir="${TERRAFORM_DIR}" output -raw benchmarker_log_group_name)"
 
 # ------------------------------------------------------------------------------
-# 3. Fargate ベンチマークタスクの起動
+# 3. 競技者EC2へのSSH接続準備（スロークエリログの確認用）
 # ------------------------------------------------------------------------------
+PUBLIC_IP="$(terraform -chdir="${TERRAFORM_DIR}" output -json contestant_public_ips \
+  | jq -r --arg target "${TARGET}" '.[$target] // empty')"
+
+remote() {
+  ssh -i "${SSH_PRIVATE_KEY_PATH}" \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      "ubuntu@${PUBLIC_IP}" "$@"
+}
+
+# ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 4. Fargate ベンチマークタスクの起動
+#    （今回の実行分だけを分析できるよう、起動前にスロークエリログをリセット）
+# ------------------------------------------------------------------------------
+printf '\n==> Truncating slow query log on %s\n' "${TARGET}"
+remote "sudo truncate -s 0 ${SLOW_QUERY_LOG_PATH}"
+
 printf '\n==> Starting benchmark task for %s\n' "${TARGET}"
 RUN_TASK_OUTPUT="$(sh -c "${RUN_TASK_CMD}")"
 
@@ -85,7 +104,7 @@ TASK_ID="${TASK_ARN##*/}"
 echo "Task ARN: ${TASK_ARN}"
 
 # ------------------------------------------------------------------------------
-# 4. タスク終了までの待機
+# 5. タスク終了までの待機
 # ------------------------------------------------------------------------------
 printf '\n==> Waiting for the benchmark task to finish (this can take a few minutes)\n'
 aws ecs wait tasks-stopped --cluster "${CLUSTER_ARN}" --tasks "${TASK_ARN}"
@@ -94,7 +113,7 @@ EXIT_CODE="$(aws ecs describe-tasks --cluster "${CLUSTER_ARN}" --tasks "${TASK_A
   --query 'tasks[0].containers[0].exitCode' --output text)"
 
 # ------------------------------------------------------------------------------
-# 5. CloudWatch Logs からこのタスク専用のログをダウンロード
+# 6. CloudWatch Logs からこのタスク専用のログをダウンロード
 #    ログストリーム名は awslogs-stream-prefix (=TARGET) / コンテナ名 / タスクID
 # ------------------------------------------------------------------------------
 mkdir -p "${LOG_DIR}"
@@ -106,6 +125,19 @@ aws logs tail "${LOG_GROUP_NAME}" --log-stream-names "${LOG_STREAM_NAME}" --sinc
 
 printf '\nBenchmark finished. Container exit code: %s\n' "${EXIT_CODE}"
 printf 'Log saved to: %s\n\n' "${LOG_FILE}"
+
+# ------------------------------------------------------------------------------
+# 7. スロークエリログの存在確認
+# ------------------------------------------------------------------------------
+set +e
+SLOW_LOG_INFO="$(remote "sudo test -s ${SLOW_QUERY_LOG_PATH} && sudo wc -l ${SLOW_QUERY_LOG_PATH}")"
+set -e
+
+if [ -n "${SLOW_LOG_INFO}" ]; then
+  printf 'Slow query log found: %s:%s (%s)\n' "${PUBLIC_IP}" "${SLOW_QUERY_LOG_PATH}" "${SLOW_LOG_INFO}"
+  printf 'View with: ssh -i %s ubuntu@%s "sudo tail -100 %s"\n\n' \
+    "${SSH_PRIVATE_KEY_PATH}" "${PUBLIC_IP}" "${SLOW_QUERY_LOG_PATH}"
+fi
 
 if [ "${EXIT_CODE}" != "0" ]; then
   exit 1
