@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# ISUCON14 webapp (Go) & nginx 設定デプロイスクリプト
+# ISUCON14 webapp (Go) & nginx 設定 & スキーマデプロイスクリプト
 #
 # 【概要】
 # ローカルの webapp/go をソースの正として、指定した競技者EC2の
@@ -10,8 +10,13 @@
 # あわせて webapp/nginx/conf.d/ をEC2の /etc/nginx/conf.d/ に同期し、
 # nginx -t の後に nginx を reload します。
 #
+# webapp/sql/ も同期したうえで /api/initialize を実行し、DBスキーマと
+# 初期データを再構築します（1-schema.sql の変更が反映される）。
+# 再初期化をスキップしたい場合は SKIP_DB_INIT=1 を設定してください。
+#
 # 【使用方法】
 #   ./provisioning/deploy_webapp.sh <contestant-01|contestant-02|contestant-03>
+#   SKIP_DB_INIT=1 ./provisioning/deploy_webapp.sh contestant-01
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -20,9 +25,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TERRAFORM_DIR="${ROOT_DIR}/provisioning/terraform"
 SSH_PRIVATE_KEY_PATH="${SSH_PRIVATE_KEY_PATH:-${TERRAFORM_DIR}/.keys/isucon14_ed25519}"
 REMOTE_WEBAPP_GO_DIR="/home/isucon/webapp/go"
+REMOTE_WEBAPP_SQL_DIR="/home/isucon/webapp/sql"
 REMOTE_NGINX_CONF_D_DIR="/etc/nginx/conf.d"
 
 TARGET="${1:-}"
+SKIP_DB_INIT="${SKIP_DB_INIT:-0}"
 
 if [ -z "${TARGET}" ]; then
   echo "Usage: $0 <contestant-01|contestant-02|contestant-03>" >&2
@@ -85,7 +92,17 @@ rsync -az --delete \
   "${ROOT_DIR}/webapp/nginx/conf.d/" "ubuntu@${PUBLIC_IP}:${REMOTE_NGINX_CONF_D_DIR}/"
 
 # ------------------------------------------------------------------------------
-# 5. リモートでビルドし、isuride-go を再起動・nginx をリロード
+# 5. webapp/sql をリモートに同期（isucon ユーザー所有のまま反映するため
+#    リモート側のrsyncをsudoで実行する）
+# ------------------------------------------------------------------------------
+printf '\n==> Syncing webapp/sql to %s (%s)\n' "${TARGET}" "${PUBLIC_IP}"
+rsync -az --delete \
+  -e "ssh ${SSH_OPTS[*]}" \
+  --rsync-path="sudo -u isucon rsync" \
+  "${ROOT_DIR}/webapp/sql/" "ubuntu@${PUBLIC_IP}:${REMOTE_WEBAPP_SQL_DIR}/"
+
+# ------------------------------------------------------------------------------
+# 6. リモートでビルドし、isuride-go を再起動・nginx をリロード
 # ------------------------------------------------------------------------------
 printf '\n==> Building and restarting isuride-go\n'
 ssh "${SSH_OPTS[@]}" "ubuntu@${PUBLIC_IP}" bash -s <<REMOTE_SCRIPT
@@ -96,4 +113,18 @@ sudo nginx -t && sudo systemctl reload nginx
 sudo systemctl --no-pager --full status isuride-go | head -n 5
 REMOTE_SCRIPT
 
-printf '\nDeployed webapp/go and nginx conf.d to %s.\n\n' "${TARGET}"
+# ------------------------------------------------------------------------------
+# 7. /api/initialize を実行し DB スキーマと初期データを再構築
+#    （webapp/sql/1-schema.sql 等の変更が反映される）
+# ------------------------------------------------------------------------------
+if [ "${SKIP_DB_INIT}" = "1" ]; then
+  printf '\n==> Skipping DB initialization (SKIP_DB_INIT=1)\n\n'
+  printf 'Deployed webapp/go, nginx conf.d and webapp/sql to %s.\n\n' "${TARGET}"
+  exit 0
+fi
+
+printf '\n==> Re-initializing DB schema via /api/initialize\n'
+ssh "${SSH_OPTS[@]}" "ubuntu@${PUBLIC_IP}" \
+  "curl -sf -X POST http://127.0.0.1:8080/api/initialize -H 'Content-Type: application/json' -d '{\"payment_server\":\"http://localhost:12345\"}'"
+
+printf '\nDeployed webapp/go, nginx conf.d and webapp/sql to %s.\n\n' "${TARGET}"
