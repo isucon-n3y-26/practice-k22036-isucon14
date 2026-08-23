@@ -36,6 +36,16 @@ CREATE TABLE chairs
 )
   COMMENT = '椅子情報テーブル';
 
+DROP TABLE IF EXISTS chair_total_distances;
+CREATE TABLE chair_total_distances
+(
+  chair_id       VARCHAR(26) NOT NULL COMMENT '椅子ID',
+  total_distance INTEGER     NOT NULL DEFAULT 0 COMMENT '累積走行距離(m)',
+  updated_at     DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT '最終更新日時',
+  PRIMARY KEY (chair_id)
+)
+  COMMENT = '椅子ごとの累積走行距離テーブル';
+
 DROP TABLE IF EXISTS chair_locations;
 CREATE TABLE chair_locations
 (

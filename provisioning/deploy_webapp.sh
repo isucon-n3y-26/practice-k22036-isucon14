@@ -58,6 +58,10 @@ SSH_OPTS=(
   -o UserKnownHostsFile=/dev/null
 )
 
+remote() {
+  ssh "${SSH_OPTS[@]}" "ubuntu@${PUBLIC_IP}" "$@"
+}
+
 # ------------------------------------------------------------------------------
 # 2. Terraform Output から対象EC2のPublic IPを取得
 # ------------------------------------------------------------------------------
@@ -105,7 +109,7 @@ rsync -az --delete \
 # 6. リモートでビルドし、isuride-go を再起動・nginx をリロード
 # ------------------------------------------------------------------------------
 printf '\n==> Building and restarting isuride-go\n'
-ssh "${SSH_OPTS[@]}" "ubuntu@${PUBLIC_IP}" bash -s <<REMOTE_SCRIPT
+remote bash -s <<REMOTE_SCRIPT
 set -Eeuo pipefail
 sudo -u isucon /home/isucon/local/golang/bin/go build -C "${REMOTE_WEBAPP_GO_DIR}" -o "${REMOTE_WEBAPP_GO_DIR}/isuride" -ldflags "-s -w"
 sudo systemctl restart isuride-go
@@ -124,7 +128,6 @@ if [ "${SKIP_DB_INIT}" = "1" ]; then
 fi
 
 printf '\n==> Re-initializing DB schema via /api/initialize\n'
-ssh "${SSH_OPTS[@]}" "ubuntu@${PUBLIC_IP}" \
-  "curl -sf -X POST http://127.0.0.1:8080/api/initialize -H 'Content-Type: application/json' -d '{\"payment_server\":\"http://localhost:12345\"}'"
+remote "curl -sf -X POST http://127.0.0.1:8080/api/initialize -H 'Content-Type: application/json' -d '{\"payment_server\":\"http://localhost:12345\"}'"
 
 printf '\nDeployed webapp/go, nginx conf.d and webapp/sql to %s.\n\n' "${TARGET}"

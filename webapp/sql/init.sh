@@ -35,3 +35,18 @@ gzip -dkc 3-initial-data.sql.gz | mysql -u"$ISUCON_DB_USER" \
 		--host "$ISUCON_DB_HOST" \
 		--port "$ISUCON_DB_PORT" \
 		"$ISUCON_DB_NAME"
+
+# 初期データの座標履歴から累積走行距離を算出
+# updated_at には元実装と同様、椅子ごとの座標の最大 created_at を設定する
+mysql -u"$ISUCON_DB_USER" \
+		-p"$ISUCON_DB_PASSWORD" \
+		--host "$ISUCON_DB_HOST" \
+		--port "$ISUCON_DB_PORT" \
+		"$ISUCON_DB_NAME" -e "INSERT INTO chair_total_distances (chair_id, total_distance, updated_at)
+SELECT chair_id, SUM(IFNULL(distance, 0)) AS total_distance, MAX(created_at) AS updated_at
+FROM (SELECT chair_id,
+             created_at,
+             ABS(latitude - LAG(latitude) OVER (PARTITION BY chair_id ORDER BY created_at)) +
+             ABS(longitude - LAG(longitude) OVER (PARTITION BY chair_id ORDER BY created_at)) AS distance
+      FROM chair_locations) tmp
+GROUP BY chair_id"
