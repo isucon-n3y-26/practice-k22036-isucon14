@@ -66,7 +66,7 @@ if [ -f "${SCRIPT_DIR}/profiling.enabled" ]; then
 			--port "$ISUCON_DB_PORT" \
 			-e "SET GLOBAL slow_query_log = ON;
 SET GLOBAL slow_query_log_file = '/var/log/mysql/slow.log';
-SET GLOBAL long_query_time = 0.1"
+SET GLOBAL long_query_time = 0.03"
 else
 	mysql -u"$ISUCON_DB_USER" \
 			-p"$ISUCON_DB_PASSWORD" \
