@@ -15,9 +15,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
+
+	"github.com/isucon/isucon14/webapp/go/repository"
 )
 
 var db *sqlx.DB
+var userRepository *repository.UserRepository
 
 func main() {
 	mux := setup()
@@ -64,6 +67,7 @@ func setup() http.Handler {
 		panic(err)
 	}
 	db = _db
+	userRepository = repository.NewUserRepository(db)
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.Logger)

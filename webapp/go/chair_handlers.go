@@ -207,6 +207,7 @@ type chairGetNotificationResponseData struct {
 	Status                string     `json:"status"`
 }
 
+// GET /api/chair/notification
 func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	chair := ctx.Value("chair").(*Chair)
@@ -247,8 +248,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		status = yetSentRideStatus.Status
 	}
 
-	user := &User{}
-	err = tx.GetContext(ctx, user, "SELECT * FROM users WHERE id = ? FOR SHARE", ride.UserID)
+	user, err := userRepository.GetByID(ctx, ride.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
