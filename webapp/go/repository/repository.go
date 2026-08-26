@@ -12,3 +12,7 @@ type Queryer interface {
 type Getter interface {
 	GetContext(ctx context.Context, dest any, query string, args ...any) error
 }
+
+type Selecter interface {
+	SelectContext(ctx context.Context, dest any, query string, args ...any) error
+}
