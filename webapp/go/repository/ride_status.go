@@ -27,6 +27,17 @@ func (r *RideStatusRepository) GetOldestUnsentByRideID(ctx context.Context, q Ge
 	return rideStatus, nil
 }
 
+func (r *RideStatusRepository) GetLatestStatusByRideID(ctx context.Context, q Getter, rideID string) (string, error) {
+	var status string
+	if err := q.GetContext(ctx, &status,
+		"SELECT status FROM ride_statuses WHERE ride_id = ? ORDER BY created_at DESC LIMIT 1",
+		rideID,
+	); err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
 func (r *RideStatusRepository) MarkChairSent(ctx context.Context, q Queryer, id string) error {
 	_, err := q.ExecContext(
 		ctx,
