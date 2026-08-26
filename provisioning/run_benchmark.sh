@@ -139,6 +139,26 @@ if [ -n "${SLOW_LOG_INFO}" ]; then
     "${SSH_PRIVATE_KEY_PATH}" "${PUBLIC_IP}" "${SLOW_QUERY_LOG_PATH}"
 fi
 
+# ------------------------------------------------------------------------------
+# 8. ベンチ結果のスコア抽出・表示
+# ------------------------------------------------------------------------------
+print_score() {
+  local log_file="$1"
+  local score_line score pass
+  score_line="$(grep -a 'msg=結果' "${log_file}" | tail -n 1 || true)"
+  if [ -z "${score_line}" ]; then
+    printf '\nScore not found in log: %s\n' "${log_file}"
+    return 0
+  fi
+  score="$(sed -nE 's/.*(スコア|"スコア")=(-?[0-9]+).*/\2/p' <<<"${score_line}")"
+  pass="$(sed -nE 's/.*pass=(true|false).*/\1/p' <<<"${score_line}")"
+  printf '\n==========================================\n'
+  printf '  Score: %s\n' "${score:-不明}"
+  printf '  Pass:  %s\n' "${pass:-不明}"
+  printf '==========================================\n'
+}
+print_score "${LOG_FILE}"
+
 if [ "${EXIT_CODE}" != "0" ]; then
   exit 1
 fi
