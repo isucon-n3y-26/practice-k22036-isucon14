@@ -48,12 +48,15 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(
-		ctx,
-		"INSERT INTO users (id, username, firstname, lastname, date_of_birth, access_token, invitation_code) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		userID, req.Username, req.FirstName, req.LastName, req.DateOfBirth, accessToken, invitationCode,
-	)
-	if err != nil {
+	if err := userRepository.Create(ctx, tx, &User{
+		ID:             userID,
+		Username:       req.Username,
+		Firstname:      req.FirstName,
+		Lastname:       req.LastName,
+		DateOfBirth:    req.DateOfBirth,
+		AccessToken:    accessToken,
+		InvitationCode: invitationCode,
+	}); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -84,8 +87,7 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// ユーザーチェック
-		var inviter User
-		err = tx.GetContext(ctx, &inviter, "SELECT * FROM users WHERE invitation_code = ?", *req.InvitationCode)
+		inviter, err := userRepository.GetByInvitationCode(ctx, *req.InvitationCode)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))

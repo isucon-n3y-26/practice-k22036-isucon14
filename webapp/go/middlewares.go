@@ -16,8 +16,7 @@ func appAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		accessToken := c.Value
-		user := &User{}
-		err = db.GetContext(ctx, user, "SELECT * FROM users WHERE access_token = ?", accessToken)
+		user, err := userRepository.GetByAccessToken(ctx, accessToken)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				writeError(w, http.StatusUnauthorized, errors.New("invalid access token"))
