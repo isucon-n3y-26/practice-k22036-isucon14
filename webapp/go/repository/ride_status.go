@@ -26,3 +26,12 @@ func (r *RideStatusRepository) GetOldestUnsentByRideID(ctx context.Context, q Ge
 	}
 	return rideStatus, nil
 }
+
+func (r *RideStatusRepository) MarkChairSent(ctx context.Context, q Queryer, id string) error {
+	_, err := q.ExecContext(
+		ctx,
+		"UPDATE ride_statuses SET chair_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?",
+		id,
+	)
+	return err
+}
