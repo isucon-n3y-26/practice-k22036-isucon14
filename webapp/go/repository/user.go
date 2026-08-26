@@ -2,17 +2,12 @@ package repository
 
 import (
 	"context"
-	"database/sql"
 	"sync"
 
 	"github.com/jmoiron/sqlx"
 
 	"github.com/isucon/isucon14/webapp/go/models"
 )
-
-type Queryer interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-}
 
 type UserRepository struct {
 	db    *sqlx.DB
