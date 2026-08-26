@@ -96,6 +96,18 @@ rsync -az --delete \
   "${ROOT_DIR}/webapp/nginx/conf.d/" "ubuntu@${PUBLIC_IP}:${REMOTE_NGINX_CONF_D_DIR}/"
 
 # ------------------------------------------------------------------------------
+# 4.5 sites-available/isuride.conf を同期(upstream keepalive 適用済みの全文)
+#     単一ファイル同期とする(--delete でのディレクトリ同期は
+#     isuride-php.conf 等を消すため行わない)
+# ------------------------------------------------------------------------------
+printf '\n==> Syncing nginx sites-available/isuride.conf to %s (%s)\n' "${TARGET}" "${PUBLIC_IP}"
+rsync -az \
+  -e "ssh ${SSH_OPTS[*]}" \
+  --rsync-path="sudo rsync" \
+  "${ROOT_DIR}/webapp/nginx/sites-available/isuride.conf" \
+  "ubuntu@${PUBLIC_IP}:/etc/nginx/sites-available/isuride.conf"
+
+# ------------------------------------------------------------------------------
 # 5. webapp/sql をリモートに同期（isucon ユーザー所有のまま反映するため
 #    リモート側のrsyncをsudoで実行する）
 # ------------------------------------------------------------------------------
