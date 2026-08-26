@@ -22,6 +22,7 @@ import (
 var db *sqlx.DB
 var userRepository *repository.UserRepository
 var rideRepository *repository.RideRepository
+var rideStatusRepository *repository.RideStatusRepository
 
 func main() {
 	mux := setup()
@@ -70,6 +71,7 @@ func setup() http.Handler {
 	db = _db
 	userRepository = repository.NewUserRepository(db)
 	rideRepository = repository.NewRideRepository(db)
+	rideStatusRepository = repository.NewRideStatusRepository(db)
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.Logger)

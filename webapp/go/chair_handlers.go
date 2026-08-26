@@ -218,7 +218,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	yetSentRideStatus := RideStatus{}
+	var yetSentRideStatus *RideStatus
 	status := ""
 
 	ride, err := rideRepository.GetLatestByChairID(ctx, tx, chair.ID)
@@ -233,7 +233,8 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := tx.GetContext(ctx, &yetSentRideStatus, `SELECT * FROM ride_statuses WHERE ride_id = ? AND chair_sent_at IS NULL ORDER BY created_at ASC LIMIT 1`, ride.ID); err != nil {
+	yetSentRideStatus, err = rideStatusRepository.GetOldestUnsentByRideID(ctx, tx, ride.ID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			status, err = getLatestRideStatus(ctx, tx, ride.ID)
 			if err != nil {
@@ -254,7 +255,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if yetSentRideStatus.ID != "" {
+	if yetSentRideStatus != nil {
 		_, err := tx.ExecContext(ctx, `UPDATE ride_statuses SET chair_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, yetSentRideStatus.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
