@@ -4,6 +4,7 @@ import "github.com/isucon/isucon14/webapp/go/models"
 
 type (
 	Chair         = models.Chair
+	NearestChair  = models.NearestChair
 	ChairModel    = models.ChairModel
 	ChairLocation = models.ChairLocation
 	User          = models.User

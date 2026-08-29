@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -75,6 +76,8 @@ func setup() http.Handler {
 	rideStatusRepository = repository.NewRideStatusRepository(db)
 	chairRepository = repository.NewChairRepository(db)
 
+	go startMatcher(context.Background())
+
 	mux := chi.NewRouter()
 	mux.Use(middleware.Logger)
 	mux.Use(middleware.Recoverer)
@@ -148,6 +151,8 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	triggerMatching()
+
 	writeJSON(w, http.StatusOK, postInitializeResponse{Language: "go"})
 }
 
@@ -182,7 +187,7 @@ func writeError(w http.ResponseWriter, statusCode int, err error) {
 	}
 	w.Write(buf)
 
-	slog.Error("error response wrote", err)
+	slog.Error("error response wrote", "error", err)
 }
 
 func secureRandomStr(b int) string {

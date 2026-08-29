@@ -27,6 +27,7 @@ SSH_PRIVATE_KEY_PATH="${SSH_PRIVATE_KEY_PATH:-${TERRAFORM_DIR}/.keys/isucon14_ed
 REMOTE_WEBAPP_GO_DIR="/home/isucon/webapp/go"
 REMOTE_WEBAPP_SQL_DIR="/home/isucon/webapp/sql"
 REMOTE_NGINX_CONF_D_DIR="/etc/nginx/conf.d"
+REMOTE_ENV_SH_PATH="/home/isucon/env.sh"
 
 TARGET="${1:-}"
 SKIP_DB_INIT="${SKIP_DB_INIT:-0}"
@@ -118,16 +119,29 @@ rsync -az --delete \
   "${ROOT_DIR}/webapp/sql/" "ubuntu@${PUBLIC_IP}:${REMOTE_WEBAPP_SQL_DIR}/"
 
 # ------------------------------------------------------------------------------
-# 6. リモートでビルドし、isuride-go を再起動・nginx をリロード
+# 5.5 env.sh をリモートに同期（isucon ユーザー所有のまま反映するため
+#     リモート側のrsyncをsudoで実行する）
 # ------------------------------------------------------------------------------
-printf '\n==> Building and restarting isuride-go\n'
+printf '\n==> Syncing env.sh to %s (%s)\n' "${TARGET}" "${PUBLIC_IP}"
+rsync -az \
+  -e "ssh ${SSH_OPTS[*]}" \
+  --rsync-path="sudo -u isucon rsync" \
+  "${ROOT_DIR}/env.sh" "ubuntu@${PUBLIC_IP}:${REMOTE_ENV_SH_PATH}"
+
+# ------------------------------------------------------------------------------
+# 6. リモートでビルドし、isuride-go を再起動（isuride-matcher はGo内部常駐のため停止・無効化）
+# ------------------------------------------------------------------------------
+printf '\n==> Building and restarting services\n'
 remote bash -s <<REMOTE_SCRIPT
 set -Eeuo pipefail
 sudo -u isucon /home/isucon/local/golang/bin/go build -C "${REMOTE_WEBAPP_GO_DIR}" -o "${REMOTE_WEBAPP_GO_DIR}/isuride" -ldflags "-s -w"
 sudo systemctl restart isuride-go
+sudo systemctl stop isuride-matcher || true
+sudo systemctl disable isuride-matcher || true
 sudo nginx -t && sudo systemctl reload nginx
 sudo systemctl --no-pager --full status isuride-go | head -n 5
 REMOTE_SCRIPT
+
 
 # ------------------------------------------------------------------------------
 # 7. /api/initialize を実行し DB スキーマと初期データを再構築

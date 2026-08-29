@@ -44,11 +44,45 @@ WHERE rides.chair_id IS NOT NULL
 func (r *ChairRepository) GetLatestLocations(ctx context.Context, q Selecter) ([]models.ChairLocation, error) {
 	locations := []models.ChairLocation{}
 	if err := q.SelectContext(ctx, &locations,
-		`SELECT cl.chair_id, cl.latitude, cl.longitude
-FROM chair_locations cl
-WHERE cl.created_at = (SELECT MAX(cl2.created_at) FROM chair_locations cl2 WHERE cl2.chair_id = cl.chair_id)`,
+		`SELECT chair_id, latitude, longitude
+FROM (
+  SELECT chair_id, latitude, longitude,
+         ROW_NUMBER() OVER (PARTITION BY chair_id ORDER BY created_at DESC) as rn
+  FROM chair_locations
+) t
+WHERE rn = 1`,
 	); err != nil {
 		return nil, err
 	}
 	return locations, nil
+}
+
+func (r *ChairRepository) GetNearestAvailableChair(ctx context.Context, q Getter, pickupLatitude, pickupLongitude int) (*models.NearestChair, error) {
+	matched := &models.NearestChair{}
+	if err := q.GetContext(ctx, matched, `
+		SELECT c.*, cl.latitude, cl.longitude,
+		       (ABS(cl.latitude - ?) + ABS(cl.longitude - ?)) AS distance
+		FROM chairs c
+		JOIN (
+			SELECT chair_id, latitude, longitude
+			FROM (
+				SELECT chair_id, latitude, longitude,
+				       ROW_NUMBER() OVER (PARTITION BY chair_id ORDER BY created_at DESC) as rn
+				FROM chair_locations
+			) t WHERE rn = 1
+		) cl ON c.id = cl.chair_id
+		WHERE c.is_active = TRUE
+		  AND NOT EXISTS (
+		    SELECT 1 FROM rides r2
+		    JOIN ride_statuses rs2 ON rs2.ride_id = r2.id
+		    WHERE r2.chair_id = c.id
+		      AND rs2.status <> 'COMPLETED'
+		      AND rs2.created_at = (SELECT MAX(created_at) FROM ride_statuses WHERE ride_id = rs2.ride_id)
+		  )
+		ORDER BY distance
+		LIMIT 1
+	`, pickupLatitude, pickupLongitude); err != nil {
+		return nil, err
+	}
+	return matched, nil
 }

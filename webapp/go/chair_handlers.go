@@ -87,6 +87,10 @@ func chairPostActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.IsActive {
+		triggerMatching()
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
