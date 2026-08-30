@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -20,16 +21,104 @@ import (
 	"github.com/isucon/isucon14/webapp/go/repository"
 )
 
+type fanoutHandler struct {
+	handlers []slog.Handler
+}
+
+func (f *fanoutHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	for _, h := range f.handlers {
+		if h.Enabled(ctx, level) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fanoutHandler) Handle(ctx context.Context, r slog.Record) error {
+	for _, h := range f.handlers {
+		if h.Enabled(ctx, r.Level) {
+			_ = h.Handle(ctx, r)
+		}
+	}
+	return nil
+}
+
+func (f *fanoutHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	newHandlers := make([]slog.Handler, len(f.handlers))
+	for i, h := range f.handlers {
+		newHandlers[i] = h.WithAttrs(attrs)
+	}
+	return &fanoutHandler{handlers: newHandlers}
+}
+
+func (f *fanoutHandler) WithGroup(name string) slog.Handler {
+	newHandlers := make([]slog.Handler, len(f.handlers))
+	for i, h := range f.handlers {
+		newHandlers[i] = h.WithGroup(name)
+	}
+	return &fanoutHandler{handlers: newHandlers}
+}
+
 var db *sqlx.DB
 var userRepository *repository.UserRepository
 var rideRepository *repository.RideRepository
 var rideStatusRepository *repository.RideStatusRepository
 var chairRepository *repository.ChairRepository
+var matcherStarted bool
 
 func main() {
+	configureLogging()
 	mux := setup()
 	slog.Info("Listening on :8080")
 	http.ListenAndServe(":8080", mux)
+}
+
+func configureLogging() {
+	level := slog.LevelInfo
+	switch os.Getenv("ISUCON_LOG_LEVEL") {
+	case "debug":
+		level = slog.LevelDebug
+	case "info":
+		level = slog.LevelInfo
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+
+	logFile := os.Getenv("ISUCON_LOG_FILE")
+	errorFile := os.Getenv("ISUCON_LOG_ERROR_FILE")
+
+	var out *os.File
+	var err error
+
+	if logFile != "" {
+		out, err = os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to open log file %s: %v\n", logFile, err)
+			os.Exit(1)
+		}
+	} else {
+		out = os.Stdout
+	}
+
+	handler := slog.NewJSONHandler(out, &slog.HandlerOptions{
+		Level: level,
+	})
+	slog.SetDefault(slog.New(handler))
+
+	if errorFile != "" {
+		errOut, err := os.OpenFile(errorFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			slog.Error("Failed to open error log file", "file", errorFile, "error", err)
+			os.Exit(1)
+		}
+		// ERROR以上を errorFile にも出力するハンドラを追加
+		errorHandler := slog.NewJSONHandler(errOut, &slog.HandlerOptions{
+			Level: slog.LevelError,
+		})
+		slog.SetDefault(slog.New(&fanoutHandler{handlers: []slog.Handler{handler, errorHandler}}))
+	}
 }
 
 func setup() http.Handler {
@@ -71,12 +160,17 @@ func setup() http.Handler {
 		panic(err)
 	}
 	db = _db
+	db.SetMaxOpenConns(100)
+	db.SetMaxIdleConns(100)
+	db.SetConnMaxLifetime(2 * time.Minute)
 	userRepository = repository.NewUserRepository(db)
 	rideRepository = repository.NewRideRepository(db)
 	rideStatusRepository = repository.NewRideStatusRepository(db)
 	chairRepository = repository.NewChairRepository(db)
 
-	go startMatcher(context.Background())
+	if err := globalChairManager.Reload(context.Background(), db); err != nil {
+		panic(err)
+	}
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.Logger)
@@ -149,6 +243,17 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	if _, err := db.ExecContext(ctx, "UPDATE settings SET value = ? WHERE name = 'payment_gateway_url'", req.PaymentServer); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	if err := globalChairManager.Reload(ctx, db); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	if !matcherStarted {
+		matcherStarted = true
+		slog.Info("starting matcher after initialization")
+		go startMatcher(context.Background())
 	}
 
 	triggerMatching()

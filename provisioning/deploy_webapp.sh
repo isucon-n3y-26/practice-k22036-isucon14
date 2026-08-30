@@ -32,6 +32,22 @@ REMOTE_ENV_SH_PATH="/home/isucon/env.sh"
 TARGET="${1:-}"
 SKIP_DB_INIT="${SKIP_DB_INIT:-0}"
 
+# デバッグ用設定（webapp/sql/profiling.enabled ファイルの有無で切り替え）
+# 有効化: touch webapp/sql/profiling.enabled && ./provisioning/deploy_webapp.sh <target>
+# 無効化: rm webapp/sql/profiling.enabled && ./provisioning/deploy_webapp.sh <target>
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "${SCRIPT_DIR}/webapp/sql/profiling.enabled" ]; then
+  export ISUCON_LOG_LEVEL="debug"
+  export ISUCON_LOG_FILE="/home/isucon/isuride-go.log"
+  export ISUCON_LOG_ERROR_FILE="/home/isucon/isuride-go-error.log"
+  printf '\n==> App debug logging ENABLED (level=debug, file output)\n'
+else
+  export ISUCON_LOG_LEVEL="info"
+  export ISUCON_LOG_FILE=""
+  export ISUCON_LOG_ERROR_FILE=""
+  printf '\n==> App debug logging DISABLED (level=info, stdout/stderr)\n'
+fi
+
 if [ -z "${TARGET}" ]; then
   echo "Usage: $0 <contestant-01|contestant-02|contestant-03>" >&2
   exit 1
@@ -123,6 +139,25 @@ rsync -az --delete \
 #     リモート側のrsyncをsudoで実行する）
 # ------------------------------------------------------------------------------
 printf '\n==> Syncing env.sh to %s (%s)\n' "${TARGET}" "${PUBLIC_IP}"
+# ログ設定を env.sh に反映（既存行を置換、なければ追加）
+update_env_var() {
+  local file="$1"
+  local var="$2"
+  local value="$3"
+  if grep -q "^${var}=" "${file}"; then
+    # macOS sed requires -i '' for in-place edit without backup
+    if [[ "$(uname)" == "Darwin" ]]; then
+      sed -i '' "s|^${var}=.*|${var}=\"${value}\"|" "${file}"
+    else
+      sed -i "s|^${var}=.*|${var}=\"${value}\"|" "${file}"
+    fi
+  else
+    echo "${var}=\"${value}\"" >> "${file}"
+  fi
+}
+update_env_var "${ROOT_DIR}/env.sh" "ISUCON_LOG_LEVEL" "${ISUCON_LOG_LEVEL}"
+update_env_var "${ROOT_DIR}/env.sh" "ISUCON_LOG_FILE" "${ISUCON_LOG_FILE}"
+update_env_var "${ROOT_DIR}/env.sh" "ISUCON_LOG_ERROR_FILE" "${ISUCON_LOG_ERROR_FILE}"
 rsync -az \
   -e "ssh ${SSH_OPTS[*]}" \
   --rsync-path="sudo -u isucon rsync" \
@@ -131,6 +166,17 @@ rsync -az \
 # ------------------------------------------------------------------------------
 # 6. リモートでビルドし、isuride-go を再起動（isuride-matcher はGo内部常駐のため停止・無効化）
 # ------------------------------------------------------------------------------
+printf '\n==> Cleaning old logs\n'
+remote bash -s <<'REMOTE_SCRIPT'
+set -Eeuo pipefail
+for logfile in /home/isucon/isuride-go.log /home/isucon/isuride-go-error.log; do
+  if [ -f "$logfile" ]; then
+    sudo -u isucon rm -f "$logfile"
+    echo "Removed $logfile"
+  fi
+done
+REMOTE_SCRIPT
+
 printf '\n==> Building and restarting services\n'
 remote bash -s <<REMOTE_SCRIPT
 set -Eeuo pipefail

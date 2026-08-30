@@ -45,15 +45,16 @@ func chairPostChairs(w http.ResponseWriter, r *http.Request) {
 	chairID := ulid.Make().String()
 	accessToken := secureRandomStr(32)
 
-	_, err := db.ExecContext(
+	if _, err := db.ExecContext(
 		ctx,
 		"INSERT INTO chairs (id, owner_id, name, model, is_active, access_token) VALUES (?, ?, ?, ?, ?, ?)",
 		chairID, owner.ID, req.Name, req.Model, false, accessToken,
-	)
-	if err != nil {
+	); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
+	globalChairManager.RegisterChair(chairID, req.Name, req.Model)
 
 	http.SetCookie(w, &http.Cookie{
 		Path:  "/",
@@ -86,6 +87,8 @@ func chairPostActivity(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
+	globalChairManager.SetActivity(chair.ID, req.IsActive)
 
 	if req.IsActive {
 		triggerMatching()
@@ -188,6 +191,8 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	globalChairManager.UpdateLocation(chair.ID, req.Latitude, req.Longitude)
+
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
 		RecordedAt: location.CreatedAt.UnixMilli(),
 	})
@@ -223,34 +228,51 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var yetSentRideStatus *RideStatus
+	var ride *Ride
 	status := ""
 
-	ride, err := rideRepository.GetLatestByChairID(ctx, tx, chair.ID)
+	rides, err := rideRepository.GetRidesWithUnsentStatusByChairID(ctx, tx, chair.ID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
-				RetryAfterMs: 30,
-			})
-			return
-		}
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	yetSentRideStatus, err = rideStatusRepository.GetOldestUnsentByRideID(ctx, tx, ride.ID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			status, err = rideStatusRepository.GetLatestStatusByRideID(ctx, tx, ride.ID)
-			if err != nil {
+	if len(rides) > 0 {
+		ride = &rides[0]
+		yetSentRideStatus, err = rideStatusRepository.GetOldestUnsentByRideID(ctx, tx, ride.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		status = yetSentRideStatus.Status
+	} else {
+		ride, err = rideRepository.GetLatestByChairID(ctx, tx, chair.ID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
+					RetryAfterMs: 30,
+				})
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		yetSentRideStatus, err = rideStatusRepository.GetOldestUnsentByRideID(ctx, tx, ride.ID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				status, err = rideStatusRepository.GetLatestStatusByRideID(ctx, tx, ride.ID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, err)
+					return
+				}
+			} else {
 				writeError(w, http.StatusInternalServerError, err)
 				return
 			}
 		} else {
-			writeError(w, http.StatusInternalServerError, err)
-			return
+			status = yetSentRideStatus.Status
 		}
-	} else {
-		status = yetSentRideStatus.Status
 	}
 
 	user, err := userRepository.GetByID(ctx, ride.UserID)

@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -19,6 +17,7 @@ func triggerMatching() {
 }
 
 func startMatcher(ctx context.Context) {
+	slog.Info("matcher started")
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -31,6 +30,7 @@ func startMatcher(ctx context.Context) {
 				slog.Error("error during matching (signal)", "error", err)
 			}
 		case <-ticker.C:
+			slog.Debug("matcher ticker fired")
 			if _, _, err := doMatching(ctx); err != nil {
 				slog.Error("error during matching (ticker)", "error", err)
 			}
@@ -69,20 +69,21 @@ func doMatching(ctx context.Context) (int, int, error) {
 		return 0, 0, nil
 	}
 
+	var assignedChairIDs []string
 	for _, ride := range rides {
-		// 2. 利用可能な椅子の中から最寄りの椅子を取得
-		// 条件: is_active = TRUE, 未完了ライドなし
-		matched, err := chairRepository.GetNearestAvailableChair(ctx, tx, ride.PickupLatitude, ride.PickupLongitude)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				// このライドに合う空き椅子が見つからない場合はスキップして後続のライドを試す（先頭詰まり防止）
-				continue
-			}
-			return ridesCount, matchedCount, err
+		// 2. メモリ上から最適な空き椅子を探索
+		matched, ok := globalChairManager.FindBestAvailableChair(ride.PickupLatitude, ride.PickupLongitude, ride.ID)
+		if !ok {
+			// 空き椅子がない場合はスキップして後続のライドを試す
+			continue
 		}
+		assignedChairIDs = append(assignedChairIDs, matched.ID)
 
 		// 3. ライドに椅子を割り当て
 		if err := rideRepository.UpdateChairID(ctx, tx, ride.ID, matched.ID); err != nil {
+			for _, cid := range assignedChairIDs {
+				globalChairManager.UnassignRide(cid)
+			}
 			return ridesCount, matchedCount, err
 		}
 		matchedCount++
@@ -93,6 +94,9 @@ func doMatching(ctx context.Context) (int, int, error) {
 	}
 
 	if err := tx.Commit(); err != nil {
+		for _, cid := range assignedChairIDs {
+			globalChairManager.UnassignRide(cid)
+		}
 		return ridesCount, matchedCount, err
 	}
 

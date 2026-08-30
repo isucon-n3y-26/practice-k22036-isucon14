@@ -616,6 +616,10 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if ride.ChairID.Valid {
+		globalChairManager.CompleteRide(ride.ChairID.String)
+	}
+
 	triggerMatching()
 
 	writeJSON(w, http.StatusOK, &appPostRideEvaluationResponse{
@@ -827,7 +831,6 @@ type appGetNearbyChairsResponseChair struct {
 
 // GET /api/app/nearby-chairs
 func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	latStr := r.URL.Query().Get("latitude")
 	lonStr := r.URL.Query().Get("longitude")
 	distanceStr := r.URL.Query().Get("distance")
@@ -857,72 +860,11 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	coordinate := Coordinate{Latitude: lat, Longitude: lon}
-
-	chairs, err := chairRepository.GetActiveChairs(ctx, db)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	unavailableChairIDs := map[string]struct{}{}
-	incompleteRideChairIDs, err := chairRepository.GetChairIDsWithIncompleteRide(ctx, db)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	for _, chairID := range incompleteRideChairIDs {
-		unavailableChairIDs[chairID] = struct{}{}
-	}
-
-	chairLocations := map[string]Coordinate{}
-	latestLocations, err := chairRepository.GetLatestLocations(ctx, db)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	for _, location := range latestLocations {
-		chairLocations[location.ChairID] = Coordinate{
-			Latitude:  location.Latitude,
-			Longitude: location.Longitude,
-		}
-	}
-
-	nearbyChairs := []appGetNearbyChairsResponseChair{}
-	for _, chair := range chairs {
-		if _, ok := unavailableChairIDs[chair.ID]; ok {
-			continue
-		}
-
-		location, ok := chairLocations[chair.ID]
-		if !ok {
-			continue
-		}
-
-		if calculateDistance(coordinate.Latitude, coordinate.Longitude, location.Latitude, location.Longitude) <= distance {
-			nearbyChairs = append(nearbyChairs, appGetNearbyChairsResponseChair{
-				ID:                chair.ID,
-				Name:              chair.Name,
-				Model:             chair.Model,
-				CurrentCoordinate: location,
-			})
-		}
-	}
-
-	retrievedAt := &time.Time{}
-	err = db.GetContext(
-		ctx,
-		retrievedAt,
-		`SELECT CURRENT_TIMESTAMP(6)`,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	nearbyChairs := globalChairManager.GetNearbyChairs(lat, lon, distance)
 
 	writeJSON(w, http.StatusOK, &appGetNearbyChairsResponse{
 		Chairs:      nearbyChairs,
-		RetrievedAt: retrievedAt.UnixMilli(),
+		RetrievedAt: time.Now().UnixMilli(),
 	})
 }
 
