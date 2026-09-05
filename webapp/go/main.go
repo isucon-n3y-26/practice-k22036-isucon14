@@ -154,6 +154,10 @@ func setup() http.Handler {
 	dbConfig.Net = "tcp"
 	dbConfig.DBName = dbname
 	dbConfig.ParseTime = true
+	// プレースホルダをクライアント側で展開し、サーバーサイドプリペアド
+	// （COM_STMT_PREPARE＋EXECUTEの2往復）をなくす。起動直後の
+	// Prepareバースト解消とクエリ毎の往復削減のため。
+	dbConfig.InterpolateParams = true
 
 	_db, err := sqlx.Connect("mysql", dbConfig.FormatDSN())
 	if err != nil {

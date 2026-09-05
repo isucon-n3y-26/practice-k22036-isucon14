@@ -36,6 +36,7 @@ services:
       - 3306:3306
     volumes:
       - ./mysql/db:/var/lib/mysql
+      - ../webapp/mysql/conf.d/isuride.cnf:/etc/mysql/conf.d/isuride.cnf:ro
       - ../webapp/sql:/docker-entrypoint-initdb.d
     healthcheck:
       test: mysqladmin ping -h 127.0.0.1 -uisucon -pisucon

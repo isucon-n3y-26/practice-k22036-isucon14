@@ -10,6 +10,9 @@
 # あわせて webapp/nginx/conf.d/ をEC2の /etc/nginx/conf.d/ に同期し、
 # nginx -t の後に nginx を reload します。
 #
+# webapp/mysql/conf.d/ をEC2の /etc/mysql/conf.d/ に同期し、
+# mysql を再起動します（COMMIT 高速化のためのチューニング反映）。
+#
 # webapp/sql/ も同期したうえで /api/initialize を実行し、DBスキーマと
 # 初期データを再構築します（1-schema.sql の変更が反映される）。
 # 再初期化をスキップしたい場合は SKIP_DB_INIT=1 を設定してください。
@@ -27,6 +30,7 @@ SSH_PRIVATE_KEY_PATH="${SSH_PRIVATE_KEY_PATH:-${TERRAFORM_DIR}/.keys/isucon14_ed
 REMOTE_WEBAPP_GO_DIR="/home/isucon/webapp/go"
 REMOTE_WEBAPP_SQL_DIR="/home/isucon/webapp/sql"
 REMOTE_NGINX_CONF_D_DIR="/etc/nginx/conf.d"
+REMOTE_MYSQL_CONF_D_DIR="/etc/mysql/conf.d"
 REMOTE_ENV_SH_PATH="/home/isucon/env.sh"
 
 TARGET="${1:-}"
@@ -123,6 +127,29 @@ rsync -az \
   --rsync-path="sudo rsync" \
   "${ROOT_DIR}/webapp/nginx/sites-available/isuride.conf" \
   "ubuntu@${PUBLIC_IP}:/etc/nginx/sites-available/isuride.conf"
+
+# ------------------------------------------------------------------------------
+# 4.6 webapp/mysql/conf.d を /etc/mysql/conf.d に同期（root所有のため
+#     リモート側のrsyncをsudoで実行する）し、mysql を再起動する
+# ------------------------------------------------------------------------------
+printf '\n==> Syncing mysql conf.d to %s (%s)\n' "${TARGET}" "${PUBLIC_IP}"
+rsync -az --delete \
+  -e "ssh ${SSH_OPTS[*]}" \
+  --rsync-path="sudo rsync" \
+  "${ROOT_DIR}/webapp/mysql/conf.d/" "ubuntu@${PUBLIC_IP}:${REMOTE_MYSQL_CONF_D_DIR}/"
+
+printf '\n==> Restarting mysql\n'
+remote bash -s <<'REMOTE_SCRIPT'
+set -Eeuo pipefail
+sudo systemctl restart mysql
+for i in $(seq 1 30); do
+  if sudo mysqladmin ping -h 127.0.0.1 --silent 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+sudo mysqladmin ping -h 127.0.0.1 --silent
+REMOTE_SCRIPT
 
 # ------------------------------------------------------------------------------
 # 5. webapp/sql をリモートに同期（isucon ユーザー所有のまま反映するため
