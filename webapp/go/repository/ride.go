@@ -27,6 +27,39 @@ func (r *RideRepository) GetLatestByChairID(ctx context.Context, q Getter, chair
 	return ride, nil
 }
 
+func (r *RideRepository) GetByID(ctx context.Context, q Getter, rideID string) (*models.Ride, error) {
+	ride := &models.Ride{}
+	if err := q.GetContext(ctx, ride,
+		"SELECT * FROM rides WHERE id = ?",
+		rideID,
+	); err != nil {
+		return nil, err
+	}
+	return ride, nil
+}
+
+func (r *RideRepository) GetLatestByUserID(ctx context.Context, q Getter, userID string) (*models.Ride, error) {
+	ride := &models.Ride{}
+	if err := q.GetContext(ctx, ride,
+		"SELECT * FROM rides WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
+		userID,
+	); err != nil {
+		return nil, err
+	}
+	return ride, nil
+}
+
+func (r *RideRepository) ListByChairID(ctx context.Context, q Selecter, chairID string) ([]models.Ride, error) {
+	rides := []models.Ride{}
+	if err := q.SelectContext(ctx, &rides,
+		`SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC`,
+		chairID,
+	); err != nil {
+		return nil, err
+	}
+	return rides, nil
+}
+
 func (r *RideRepository) GetUnassignedMatchingRides(ctx context.Context, q Selecter) ([]models.Ride, error) {
 	rides := []models.Ride{}
 	if err := q.SelectContext(ctx, &rides, `

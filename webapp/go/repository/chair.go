@@ -16,6 +16,17 @@ func NewChairRepository(db *sqlx.DB) *ChairRepository {
 	return &ChairRepository{db: db}
 }
 
+func (r *ChairRepository) GetByID(ctx context.Context, q Getter, chairID string) (*models.Chair, error) {
+	chair := &models.Chair{}
+	if err := q.GetContext(ctx, chair,
+		"SELECT * FROM chairs WHERE id = ?",
+		chairID,
+	); err != nil {
+		return nil, err
+	}
+	return chair, nil
+}
+
 func (r *ChairRepository) GetActiveChairs(ctx context.Context, q Selecter) ([]models.Chair, error) {
 	chairs := []models.Chair{}
 	if err := q.SelectContext(ctx, &chairs,
