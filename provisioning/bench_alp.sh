@@ -86,7 +86,7 @@ set -e
 # ------------------------------------------------------------------------------
 printf '\n==> Profiling access log with alp\n'
 remote "command -v '${ALP_BIN}' >/dev/null || { echo 'alp not found: ${ALP_BIN}' >&2; exit 1; } && \
-  sudo cat ${ACCESS_LOG} | '${ALP_BIN}' json --sort avg --output count,method,uri,min,max,sum,avg,p99 --format md"
+  sudo cat ${ACCESS_LOG} | '${ALP_BIN}' json --sort avg --output count,method,uri,min,max,sum,avg,p99 --format md -m '/api/chair/rides/[^/]+/status,/api/app/rides/[^/]+/evaluation,/assets/.*,/images/.*'"
 
 if [ "${BENCH_EXIT_CODE}" != "0" ]; then
   printf '\nDone (benchmark failed with exit code %s, but profiling completed).\n' "${BENCH_EXIT_CODE}"
