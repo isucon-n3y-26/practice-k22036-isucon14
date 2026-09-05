@@ -741,49 +741,22 @@ func buildAppNotificationData(ctx context.Context, q queryGetter, userID string,
 	return data, nil
 }
 
+// getChairStats はユーザー向け通知に含める椅子の統計情報
+// （完了ライド数と評価平均）を返す。
+// 完了の定義は ARRIVED・CARRYING・COMPLETED の各ステータスを
+// すべて含むライドであること。集計自体は
+// ChairRepository.GetCompletedStats に1クエリで委譲しており、
+// 戻り値を通知用の型に詰め替える薄いラッパーである。
 func getChairStats(ctx context.Context, q queryGetter, chairID string) (appGetNotificationResponseChairStats, error) {
 	stats := appGetNotificationResponseChairStats{}
 
-	rides, err := rideRepository.ListByChairID(ctx, q, chairID)
+	s, err := chairRepository.GetCompletedStats(ctx, q, chairID)
 	if err != nil {
 		return stats, err
 	}
 
-	totalRideCount := 0
-	totalEvaluation := 0.0
-	for _, ride := range rides {
-		rideStatuses, err := rideStatusRepository.ListByRideID(ctx, q, ride.ID)
-		if err != nil {
-			return stats, err
-		}
-
-		var arrivedAt, pickupedAt *time.Time
-		var isCompleted bool
-		for _, status := range rideStatuses {
-			if status.Status == "ARRIVED" {
-				arrivedAt = &status.CreatedAt
-			} else if status.Status == "CARRYING" {
-				pickupedAt = &status.CreatedAt
-			}
-			if status.Status == "COMPLETED" {
-				isCompleted = true
-			}
-		}
-		if arrivedAt == nil || pickupedAt == nil {
-			continue
-		}
-		if !isCompleted {
-			continue
-		}
-
-		totalRideCount++
-		totalEvaluation += float64(*ride.Evaluation)
-	}
-
-	stats.TotalRidesCount = totalRideCount
-	if totalRideCount > 0 {
-		stats.TotalEvaluationAvg = totalEvaluation / float64(totalRideCount)
-	}
+	stats.TotalRidesCount = s.TotalRidesCount
+	stats.TotalEvaluationAvg = s.TotalEvaluationAvg
 
 	return stats, nil
 }

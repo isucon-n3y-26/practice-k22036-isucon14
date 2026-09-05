@@ -27,6 +27,25 @@ func (r *ChairRepository) GetByID(ctx context.Context, q Getter, chairID string)
 	return chair, nil
 }
 
+// GetCompletedStats は椅子の完了ライド数と評価平均を1クエリで取得する。
+// 完了の定義は getChairStats と同一（ARRIVED・CARRYING・COMPLETED の
+// ステータスをすべて含むライドを数える）。
+func (r *ChairRepository) GetCompletedStats(ctx context.Context, q Getter, chairID string) (models.ChairStats, error) {
+	stats := models.ChairStats{}
+	if err := q.GetContext(ctx, &stats, `
+		SELECT COUNT(*) AS total_rides_count, COALESCE(AVG(r.evaluation), 0) AS total_evaluation_avg
+		FROM rides r
+		WHERE r.chair_id = ?
+		  AND r.evaluation IS NOT NULL
+		  AND EXISTS (SELECT 1 FROM ride_statuses s1 WHERE s1.ride_id = r.id AND s1.status = 'ARRIVED')
+		  AND EXISTS (SELECT 1 FROM ride_statuses s2 WHERE s2.ride_id = r.id AND s2.status = 'CARRYING')
+		  AND EXISTS (SELECT 1 FROM ride_statuses s3 WHERE s3.ride_id = r.id AND s3.status = 'COMPLETED')
+	`, chairID); err != nil {
+		return models.ChairStats{}, err
+	}
+	return stats, nil
+}
+
 func (r *ChairRepository) GetActiveChairs(ctx context.Context, q Selecter) ([]models.Chair, error) {
 	chairs := []models.Chair{}
 	if err := q.SelectContext(ctx, &chairs,

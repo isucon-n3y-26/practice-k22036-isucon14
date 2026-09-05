@@ -28,6 +28,11 @@ type ChairModel struct {
 	Speed int    `db:"speed"`
 }
 
+type ChairStats struct {
+	TotalRidesCount    int     `db:"total_rides_count"`
+	TotalEvaluationAvg float64 `db:"total_evaluation_avg"`
+}
+
 type ChairLocation struct {
 	ID        string    `db:"id"`
 	ChairID   string    `db:"chair_id"`

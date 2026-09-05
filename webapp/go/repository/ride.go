@@ -81,24 +81,3 @@ func (r *RideRepository) UpdateChairID(ctx context.Context, q Queryer, rideID, c
 	_, err := q.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", chairID, rideID)
 	return err
 }
-
-func (r *RideRepository) GetRidesWithUnsentStatusByChairID(ctx context.Context, q Selecter, chairID string) ([]models.Ride, error) {
-	rides := []models.Ride{}
-	if err := q.SelectContext(ctx, &rides, `
-		WITH unsent AS (
-			SELECT rs.ride_id,
-			       MIN(CASE rs.status WHEN 'COMPLETED' THEN 0 ELSE 1 END) as priority,
-			       MIN(rs.created_at) as oldest_created
-			FROM ride_statuses rs
-			WHERE rs.chair_sent_at IS NULL
-			  AND rs.ride_id IN (SELECT id FROM rides WHERE chair_id = ?)
-			GROUP BY rs.ride_id
-		)
-		SELECT r.* FROM rides r
-		INNER JOIN unsent ON unsent.ride_id = r.id
-		ORDER BY unsent.priority, unsent.oldest_created
-	`, chairID); err != nil {
-		return nil, err
-	}
-	return rides, nil
-}
