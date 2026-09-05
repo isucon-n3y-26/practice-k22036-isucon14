@@ -159,6 +159,8 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ride, err := rideRepository.GetLatestByChairID(ctx, tx, chair.ID)
+	statusChanged := false
+	var changedRide *Ride
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusInternalServerError, err)
@@ -176,6 +178,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
+				statusChanged = true
 			}
 
 			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
@@ -183,13 +186,21 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
+				statusChanged = true
 			}
 		}
+		changedRide = ride
 	}
 
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	// PICKUP/ARRIVED 遷移時のみ両SSEを起床させる（移動のみの座標更新では起床しない）
+	if statusChanged && changedRide != nil {
+		WakeChair(chair.ID)
+		WakeUser(changedRide.UserID)
 	}
 
 	globalChairManager.UpdateLocation(chair.ID, req.Latitude, req.Longitude)
@@ -226,6 +237,8 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	wake, unsub := subscribeChair(chair.ID)
+	defer unsub()
 
 	StreamRideNotifications(
 		stream,
@@ -253,6 +266,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		func(ctx context.Context, id string) error {
 			return rideStatusRepository.MarkChairSent(ctx, db, id)
 		},
+		wake,
 	)
 }
 
@@ -342,12 +356,17 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		writeError(w, http.StatusBadRequest, errors.New("invalid status"))
+		return
 	}
 
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
+	// ENROUTE/CARRYING 遷移を両SSEに通知する
+	WakeChair(chair.ID)
+	WakeUser(ride.UserID)
 
 	w.WriteHeader(http.StatusNoContent)
 }

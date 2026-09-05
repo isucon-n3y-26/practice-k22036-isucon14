@@ -100,6 +100,11 @@ func doMatching(ctx context.Context) (int, int, error) {
 		return ridesCount, matchedCount, err
 	}
 
+	// 割当により椅子向けSSEで可視になったMATCHINGを通知する
+	for _, cid := range assignedChairIDs {
+		WakeChair(cid)
+	}
+
 	return ridesCount, matchedCount, nil
 }
 

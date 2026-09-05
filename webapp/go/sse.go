@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -52,21 +53,95 @@ func (s *SSEStream) Done() <-chan struct{} {
 	return s.ctx.Done()
 }
 
-// Wait は切断されるか d が経過するまで待つ。切断時は false を返す。
-func (s *SSEStream) Wait(d time.Duration) bool {
+// AwaitWake は起床シグナル・切断・安全網タイムアウトのいずれかまで待つ。
+// 切断時は false を返す。
+func (s *SSEStream) AwaitWake(wake <-chan struct{}, d time.Duration) bool {
 	select {
 	case <-s.ctx.Done():
 		return false
+	case <-wake:
+		return true
 	case <-time.After(d):
 		return true
 	}
 }
 
 const (
-	ssePollInterval       = 50 * time.Millisecond
-	sseEmptyRetryInterval = 100 * time.Millisecond
+	// sseSafetyPollInterval は起床シグナルを取りこぼしても3秒以内の
+	// 通知要件を満たすための安全網ポーリング間隔。
+	sseSafetyPollInterval = time.Second
 	sseUnsentBatchSize    = 20
 )
+
+// wakeHub はライド状態遷移の起床通知を椅子・ユーザー単位で配信する。
+// SSEループはDBポーリングの代わりにこのシグナルで起床するため、
+// アイドル時の通知系QPSを 1/50ms → 1/s + 遷移回数に削減できる。
+// シグナルは合流型（buffered size 1・非ブロッキング）で、
+// 取りこぼしは安全網ポーリングが拾う。
+type wakeHub struct {
+	mu    sync.Mutex
+	chair map[string]map[chan struct{}]struct{}
+	user  map[string]map[chan struct{}]struct{}
+}
+
+var globalWakeHub = &wakeHub{
+	chair: make(map[string]map[chan struct{}]struct{}),
+	user:  make(map[string]map[chan struct{}]struct{}),
+}
+
+func (h *wakeHub) subscribe(m map[string]map[chan struct{}]struct{}, id string) (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	h.mu.Lock()
+	set, ok := m[id]
+	if !ok {
+		set = make(map[chan struct{}]struct{})
+		m[id] = set
+	}
+	set[ch] = struct{}{}
+	h.mu.Unlock()
+	unsub := func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if set, ok := m[id]; ok {
+			delete(set, ch)
+			if len(set) == 0 {
+				delete(m, id)
+			}
+		}
+	}
+	return ch, unsub
+}
+
+func (h *wakeHub) broadcast(m map[string]map[chan struct{}]struct{}, id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range m[id] {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// subscribeChair は椅子向け起床シグナルを購読する。unsub は接続終了時に必ず呼ぶこと。
+func subscribeChair(chairID string) (<-chan struct{}, func()) {
+	return globalWakeHub.subscribe(globalWakeHub.chair, chairID)
+}
+
+// subscribeUser はユーザー向け起床シグナルを購読する。unsub は接続終了時に必ず呼ぶこと。
+func subscribeUser(userID string) (<-chan struct{}, func()) {
+	return globalWakeHub.subscribe(globalWakeHub.user, userID)
+}
+
+// WakeChair は椅子向け通知SSEループを起床させる。コミット後に呼ぶこと。
+func WakeChair(chairID string) {
+	globalWakeHub.broadcast(globalWakeHub.chair, chairID)
+}
+
+// WakeUser はユーザー向け通知SSEループを起床させる。コミット後に呼ぶこと。
+func WakeUser(userID string) {
+	globalWakeHub.broadcast(globalWakeHub.user, userID)
+}
 
 // StreamRideNotifications は通知ストリームの共通ポーリングループをカプセル化する。
 //
@@ -75,8 +150,10 @@ const (
 //   - fetchRide: rideID からライドを取得する
 //   - build: ride と status から通知ペイロードを組み立てる
 //   - markSent: 送信済みマークを付ける
+//   - wake: 状態遷移時の起床シグナル。なければ安全網ポーリングのみで待つ
 //
 // すべての状態遷移を発生順に少なくとも1回以上返し、状態変更から3秒以内の通知を満たす。
+// アイドル時はDBを叩かず、起床または安全網間隔でのみポーリングする。
 func StreamRideNotifications(
 	s *SSEStream,
 	fetchUnsent func(ctx context.Context) ([]RideStatus, error),
@@ -84,6 +161,7 @@ func StreamRideNotifications(
 	fetchRide func(ctx context.Context, rideID string) (*Ride, error),
 	build func(ctx context.Context, ride *Ride, status string) (any, error),
 	markSent func(ctx context.Context, id string) error,
+	wake <-chan struct{},
 ) {
 	ctx := s.ctx
 	first := true
@@ -96,10 +174,9 @@ func StreamRideNotifications(
 
 		unsent, err := fetchUnsent(ctx)
 		if err != nil {
-			select {
-			case <-ctx.Done():
+			// DBエラー時はホットスピンを避けて待機してからリトライする
+			if !s.AwaitWake(wake, sseSafetyPollInterval) {
 				return
-			default:
 			}
 			continue
 		}
@@ -132,13 +209,13 @@ func StreamRideNotifications(
 			ride, status, err := fetchLatest(ctx)
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
-					// ライド未存在（割当前など）は待機してリトライ
-					if !s.Wait(sseEmptyRetryInterval) {
+					// ライド未存在（割当前など）は起床または安全網で再試行
+					if !s.AwaitWake(wake, sseSafetyPollInterval) {
 						return
 					}
 					continue
 				}
-				if !s.Wait(ssePollInterval) {
+				if !s.AwaitWake(wake, sseSafetyPollInterval) {
 					return
 				}
 				continue
@@ -151,7 +228,7 @@ func StreamRideNotifications(
 			first = false
 		}
 
-		if !s.Wait(ssePollInterval) {
+		if !s.AwaitWake(wake, sseSafetyPollInterval) {
 			return
 		}
 	}

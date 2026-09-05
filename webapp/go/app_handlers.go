@@ -426,6 +426,9 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// MATCHING 作成をユーザー向けSSEに通知する（接続済みフロント用）
+	WakeUser(user.ID)
+
 	triggerMatching()
 
 	writeJSON(w, http.StatusAccepted, &appPostRidesResponse{
@@ -625,6 +628,12 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		globalChairManager.CompleteRide(ride.ChairID.String)
 	}
 
+	// COMPLETED 作成を両SSEに通知する
+	WakeUser(ride.UserID)
+	if ride.ChairID.Valid {
+		WakeChair(ride.ChairID.String)
+	}
+
 	triggerMatching()
 
 	writeJSON(w, http.StatusOK, &appPostRideEvaluationResponse{
@@ -669,6 +678,8 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	wake, unsub := subscribeUser(user.ID)
+	defer unsub()
 
 	StreamRideNotifications(
 		stream,
@@ -696,6 +707,7 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 		func(ctx context.Context, id string) error {
 			return rideStatusRepository.MarkAppSent(ctx, db, id)
 		},
+		wake,
 	)
 }
 
