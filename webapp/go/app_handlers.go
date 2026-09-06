@@ -323,6 +323,12 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// マッチング待ちキューに登録する（同一トランザクション）
+	if err := matchingQueueRepository.Enqueue(ctx, tx, rideID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
 	var rideCount int
 	if err := tx.GetContext(ctx, &rideCount, `SELECT COUNT(*) FROM rides WHERE user_id = ? `, user.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)

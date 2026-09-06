@@ -65,6 +65,7 @@ var userRepository *repository.UserRepository
 var rideRepository *repository.RideRepository
 var rideStatusRepository *repository.RideStatusRepository
 var chairRepository *repository.ChairRepository
+var matchingQueueRepository *repository.MatchingQueueRepository
 var globalStatusCache *cache.StatusCache
 var matcherStarted bool
 
@@ -173,6 +174,7 @@ func setup() http.Handler {
 	rideRepository = repository.NewRideRepository(db)
 	rideStatusRepository = repository.NewRideStatusRepository(db)
 	chairRepository = repository.NewChairRepository(db)
+	matchingQueueRepository = repository.NewMatchingQueueRepository(db)
 	globalStatusCache = cache.NewStatusCache(func(ctx context.Context, q cache.Getter, rideID string) (string, error) {
 		return rideStatusRepository.GetLatestStatusByRideID(ctx, q, rideID)
 	})
@@ -261,6 +263,20 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 
 	// DB初期化で全データが破棄されるため、状態キャッシュもクリアする
 	globalStatusCache.Clear()
+
+	// キューに積まれていない未割当MATCHINGライドを救済登録する
+	// （通常は空のはずだが、再起動時などの取りこぼし対策）
+	if pending, err := rideRepository.GetUnassignedMatchingRides(ctx, db); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	} else {
+		for _, ride := range pending {
+			if err := matchingQueueRepository.EnqueueIfMissing(ctx, db, ride.ID); err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+	}
 
 	if !matcherStarted {
 		matcherStarted = true

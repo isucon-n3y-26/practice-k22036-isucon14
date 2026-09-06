@@ -91,14 +91,15 @@ func (r *RideRepository) ListByChairID(ctx context.Context, q Selecter, chairID 
 
 func (r *RideRepository) GetUnassignedMatchingRides(ctx context.Context, q Selecter) ([]models.Ride, error) {
 	rides := []models.Ride{}
+	// 最新状態が MATCHING の未割当ライドを古い順に返す。
+	// 「MATCHING 行が存在し、それより新しい行が存在しない」を
+	// anti-join で表すことで、相関MAXの導出テーブルをなくしている。
 	if err := q.SelectContext(ctx, &rides, `
 		SELECT r.* FROM rides r
-		JOIN (
-			SELECT ride_id, status FROM ride_statuses rs
-			WHERE rs.created_at = (SELECT MAX(created_at) FROM ride_statuses WHERE ride_id = rs.ride_id)
-		) latest_rs ON latest_rs.ride_id = r.id
+		INNER JOIN ride_statuses m ON m.ride_id = r.id AND m.status = 'MATCHING'
+		LEFT JOIN ride_statuses later ON later.ride_id = r.id AND later.created_at > m.created_at
 		WHERE r.chair_id IS NULL
-		  AND latest_rs.status = 'MATCHING'
+		  AND later.id IS NULL
 		ORDER BY r.created_at
 	`); err != nil {
 		return nil, err

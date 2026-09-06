@@ -122,6 +122,15 @@ CREATE TABLE ride_statuses
 )
   COMMENT = 'ライドステータスの変更履歴テーブル';
 
+DROP TABLE IF EXISTS matching_queue;
+CREATE TABLE matching_queue
+(
+  ride_id    VARCHAR(26) NOT NULL COMMENT 'ライドID',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '登録日時',
+  PRIMARY KEY (ride_id)
+)
+  COMMENT = 'マッチング待ちキューテーブル';
+
 DROP TABLE IF EXISTS owners;
 CREATE TABLE owners
 (

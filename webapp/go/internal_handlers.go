@@ -18,7 +18,10 @@ func triggerMatching() {
 
 func startMatcher(ctx context.Context) {
 	slog.Info("matcher started")
-	ticker := time.NewTicker(100 * time.Millisecond)
+	// ティッカーは取りこぼし時の安全網専用。定常のマッチングは
+	// triggerMatching（配車要求・椅子有効化・評価完了）で即時起動するため、
+	// ここは低頻度でよい。全表JOINの走査を10Hzで回さないための設定。
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -59,8 +62,9 @@ func doMatching(ctx context.Context) (int, int, error) {
 	}
 	defer tx.Rollback()
 
-	// 1. MATCHING 状態で chair_id が未割当のライド一覧を取得（古い順）
-	rides, err := rideRepository.GetUnassignedMatchingRides(ctx, tx)
+	// 1. マッチング待ちキューのライド一覧を取得（古い順）
+	// 全表JOIN走査の代わりにキューを見るため、待ち行列の規模にのみ比例する
+	rides, err := matchingQueueRepository.ListPendingRides(ctx, tx)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -74,13 +78,19 @@ func doMatching(ctx context.Context) (int, int, error) {
 		// 2. メモリ上から最適な空き椅子を探索
 		matched, ok := globalChairManager.FindBestAvailableChair(ride.PickupLatitude, ride.PickupLongitude, ride.ID)
 		if !ok {
-			// 空き椅子がない場合はスキップして後続のライドを試す
+			// 空き椅子がない場合はキューに残して後続のライドを試す
 			continue
 		}
 		assignedChairIDs = append(assignedChairIDs, matched.ID)
 
-		// 3. ライドに椅子を割り当て
+		// 3. ライドに椅子を割り当て、キューから取り除く
 		if err := rideRepository.UpdateChairID(ctx, tx, ride.ID, matched.ID); err != nil {
+			for _, cid := range assignedChairIDs {
+				globalChairManager.UnassignRide(cid)
+			}
+			return ridesCount, matchedCount, err
+		}
+		if err := matchingQueueRepository.Dequeue(ctx, tx, ride.ID); err != nil {
 			for _, cid := range assignedChairIDs {
 				globalChairManager.UnassignRide(cid)
 			}
