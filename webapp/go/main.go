@@ -18,6 +18,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 
+	"github.com/isucon/isucon14/webapp/go/cache"
 	"github.com/isucon/isucon14/webapp/go/repository"
 )
 
@@ -64,6 +65,7 @@ var userRepository *repository.UserRepository
 var rideRepository *repository.RideRepository
 var rideStatusRepository *repository.RideStatusRepository
 var chairRepository *repository.ChairRepository
+var globalStatusCache *cache.StatusCache
 var matcherStarted bool
 
 func main() {
@@ -171,6 +173,9 @@ func setup() http.Handler {
 	rideRepository = repository.NewRideRepository(db)
 	rideStatusRepository = repository.NewRideStatusRepository(db)
 	chairRepository = repository.NewChairRepository(db)
+	globalStatusCache = cache.NewStatusCache(func(ctx context.Context, q cache.Getter, rideID string) (string, error) {
+		return rideStatusRepository.GetLatestStatusByRideID(ctx, q, rideID)
+	})
 
 	if err := globalChairManager.Reload(context.Background(), db); err != nil {
 		panic(err)
@@ -253,6 +258,9 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
+	// DB初期化で全データが破棄されるため、状態キャッシュもクリアする
+	globalStatusCache.Clear()
 
 	if !matcherStarted {
 		matcherStarted = true

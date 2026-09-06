@@ -402,6 +402,7 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 
 	// MATCHING 作成をユーザー向けSSEに通知する（接続済みフロント用）
 	WakeUser(user.ID)
+	globalStatusCache.Set(rideID, "MATCHING")
 
 	triggerMatching()
 
@@ -508,7 +509,7 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	status, err := rideStatusRepository.GetLatestStatusByRideID(ctx, tx, ride.ID)
+	status, err := globalStatusCache.Get(ctx, tx, ride.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -607,6 +608,7 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 	if ride.ChairID.Valid {
 		WakeChair(ride.ChairID.String)
 	}
+	globalStatusCache.Set(rideID, "COMPLETED")
 
 	triggerMatching()
 
@@ -666,7 +668,7 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, "", err
 			}
-			status, err := rideStatusRepository.GetLatestStatusByRideID(ctx, db, ride.ID)
+			status, err := globalStatusCache.Get(ctx, db, ride.ID)
 			if err != nil {
 				return nil, "", err
 			}

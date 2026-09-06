@@ -155,6 +155,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 
 	ride, err := rideRepository.GetLatestByChairID(ctx, tx, chair.ID)
 	statusChanged := false
+	insertedStatus := ""
 	var changedRide *Ride
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -162,7 +163,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		status, err := rideStatusRepository.GetLatestStatusByRideID(ctx, tx, ride.ID)
+		status, err := globalStatusCache.Get(ctx, tx, ride.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -174,6 +175,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				statusChanged = true
+				insertedStatus = "PICKUP"
 			}
 
 			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
@@ -182,6 +184,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				statusChanged = true
+				insertedStatus = "ARRIVED"
 			}
 		}
 		changedRide = ride
@@ -192,8 +195,10 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// PICKUP/ARRIVED 遷移時のみ両SSEを起床させる（移動のみの座標更新では起床しない）
+	// PICKUP/ARRIVED 遷移時のみ両SSEを起床させ、キャッシュを更新する
+	// （移動のみの座標更新では起床しない）
 	if statusChanged && changedRide != nil {
+		globalStatusCache.Set(changedRide.ID, insertedStatus)
 		WakeChair(chair.ID)
 		WakeUser(changedRide.UserID)
 	}
@@ -246,7 +251,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, "", err
 			}
-			status, err := rideStatusRepository.GetLatestStatusByRideID(ctx, db, ride.ID)
+			status, err := globalStatusCache.Get(ctx, db, ride.ID)
 			if err != nil {
 				return nil, "", err
 			}
@@ -336,7 +341,7 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	// After Picking up user
 	case "CARRYING":
-		status, err := rideStatusRepository.GetLatestStatusByRideID(ctx, tx, ride.ID)
+		status, err := globalStatusCache.Get(ctx, tx, ride.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -359,9 +364,10 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ENROUTE/CARRYING 遷移を両SSEに通知する
+	// ENROUTE/CARRYING 遷移を両SSEに通知し、キャッシュを更新する
 	WakeChair(chair.ID)
 	WakeUser(ride.UserID)
+	globalStatusCache.Set(ride.ID, req.Status)
 
 	w.WriteHeader(http.StatusNoContent)
 }
