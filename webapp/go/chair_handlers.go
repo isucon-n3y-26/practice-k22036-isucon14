@@ -119,14 +119,9 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	// 直前の位置情報を取得（走行距離の差分計算用）
-	prevLocation := &ChairLocation{}
-	err = tx.GetContext(ctx, prevLocation, `SELECT * FROM chair_locations WHERE chair_id = ? ORDER BY created_at DESC LIMIT 1`, chair.ID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	hasPrev := err == nil
+	// 直前の位置情報はインメモリの椅子管理から取得する（走行距離の差分計算用）。
+	// ChairManager.GetLocation は直前位置SELECTと等価のため、SELECT 1本を削減できる。
+	prevLat, prevLon, hasPrev := globalChairManager.GetLocation(chair.ID)
 
 	chairLocationID := ulid.Make().String()
 	if _, err := tx.ExecContext(
@@ -151,7 +146,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 			`INSERT INTO chair_total_distances (chair_id, total_distance) VALUES (?, ?)
 			 ON DUPLICATE KEY UPDATE total_distance = total_distance + VALUES(total_distance)`,
 			chair.ID,
-			calculateDistance(prevLocation.Latitude, prevLocation.Longitude, req.Latitude, req.Longitude),
+			calculateDistance(prevLat, prevLon, req.Latitude, req.Longitude),
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return

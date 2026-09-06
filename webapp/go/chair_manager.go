@@ -165,6 +165,23 @@ func (cm *ChairManager) UpdateLocation(chairID string, lat, lon int) {
 	}
 }
 
+// GetLocation は椅子の最新既知座標を返す。chairPostCoordinate の
+// 走行距離差分計算用で、直前位置SELECT
+// （chair_locations を created_at 降順で1件取得）と等価。
+// ChairManager は初期化時にDB最新値でロードされ、座標更新のたびに
+// 更新されるため、常に直前SELECTと同じ値を返す。
+// 未登録・未測位の椅子に対しては ok=false を返す。
+func (cm *ChairManager) GetLocation(chairID string) (lat, lon int, ok bool) {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	state, ok := cm.chairs[chairID]
+	if !ok || !state.HasLocation {
+		return 0, 0, false
+	}
+	return state.Latitude, state.Longitude, true
+}
+
 func (cm *ChairManager) AssignRide(chairID, rideID string) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()

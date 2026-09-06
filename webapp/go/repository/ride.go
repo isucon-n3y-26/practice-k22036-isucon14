@@ -49,6 +49,35 @@ func (r *RideRepository) GetLatestByUserID(ctx context.Context, q Getter, userID
 	return ride, nil
 }
 
+// ListCompletedByUserID は最新状態が COMPLETED のライドのみを作成降順で返す。
+func (r *RideRepository) ListCompletedByUserID(ctx context.Context, q Selecter, userID string) ([]models.Ride, error) {
+	rides := []models.Ride{}
+	if err := q.SelectContext(ctx, &rides, `
+		SELECT r.* FROM rides r
+		WHERE r.user_id = ?
+		  AND (SELECT rs.status FROM ride_statuses rs
+		       WHERE rs.ride_id = r.id ORDER BY rs.created_at DESC LIMIT 1) = 'COMPLETED'
+		ORDER BY r.created_at DESC
+	`, userID); err != nil {
+		return nil, err
+	}
+	return rides, nil
+}
+
+// CountContinuingByUserID は最新状態が COMPLETED でないライド数を返す。
+func (r *RideRepository) CountContinuingByUserID(ctx context.Context, q Getter, userID string) (int, error) {
+	var count int
+	if err := q.GetContext(ctx, &count, `
+		SELECT COUNT(*) FROM rides r
+		WHERE r.user_id = ?
+		  AND (SELECT rs.status FROM ride_statuses rs
+		       WHERE rs.ride_id = r.id ORDER BY rs.created_at DESC LIMIT 1) != 'COMPLETED'
+	`, userID); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (r *RideRepository) ListByChairID(ctx context.Context, q Selecter, chairID string) ([]models.Ride, error) {
 	rides := []models.Ride{}
 	if err := q.SelectContext(ctx, &rides,

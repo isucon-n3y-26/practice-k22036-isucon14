@@ -206,28 +206,14 @@ func appGetRides(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	rides := []Ride{}
-	if err := tx.SelectContext(
-		ctx,
-		&rides,
-		`SELECT * FROM rides WHERE user_id = ? ORDER BY created_at DESC`,
-		user.ID,
-	); err != nil {
+	rides, err := rideRepository.ListCompletedByUserID(ctx, tx, user.ID)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
 	items := []getAppRidesResponseItem{}
 	for _, ride := range rides {
-		status, err := rideStatusRepository.GetLatestStatusByRideID(ctx, tx, ride.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if status != "COMPLETED" {
-			continue
-		}
-
 		fare, err := calculateDiscountedFare(ctx, tx, user.ID, &ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -307,22 +293,10 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	rides := []Ride{}
-	if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE user_id = ?`, user.ID); err != nil {
+	continuingRideCount, err := rideRepository.CountContinuingByUserID(ctx, tx, user.ID)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-
-	continuingRideCount := 0
-	for _, ride := range rides {
-		status, err := rideStatusRepository.GetLatestStatusByRideID(ctx, tx, ride.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if status != "COMPLETED" {
-			continuingRideCount++
-		}
 	}
 
 	if continuingRideCount > 0 {
