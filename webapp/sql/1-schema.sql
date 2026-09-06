@@ -55,8 +55,10 @@ CREATE TABLE chair_locations
   latitude   INTEGER     NOT NULL COMMENT '経度',
   longitude  INTEGER     NOT NULL COMMENT '緯度',
   created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '登録日時',
-  PRIMARY KEY (id),
-  INDEX idx_chair_locations_chair_id_created_at_desc (chair_id, created_at DESC)
+  PRIMARY KEY (id)
+  -- NOTE: (chair_id, created_at) のセカンダリindexは意図的に持たない。
+  -- 直前位置取得は ChairManager.GetLocation にインメモリ化済みのため、
+  -- 最高頻度INSERTパスでの維持コストを避ける。Reload時などの全走査は許容する。
 )
   COMMENT = '椅子の現在位置情報テーブル';
 

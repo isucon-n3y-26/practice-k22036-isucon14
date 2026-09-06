@@ -8,6 +8,8 @@ import (
 	"net/http"
 
 	"github.com/oklog/ulid/v2"
+
+	"github.com/isucon/isucon14/webapp/go/cache"
 )
 
 type chairPostChairsRequest struct {
@@ -153,24 +155,26 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ride, err := rideRepository.GetLatestByChairID(ctx, tx, chair.ID)
+	rideID, hasRide := globalChairManager.GetCurrentRideID(chair.ID)
 	statusChanged := false
 	insertedStatus := ""
-	var changedRide *Ride
-	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
+	var changedCoords cache.RideCoords
+	if !hasRide {
+		// 未割当時は GetLatestByChairID が ErrNoRows の場合と同等で遷移判定不要
+	} else {
+		coords, err := globalRideCoordsCache.Get(ctx, rideID)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-	} else {
-		status, err := globalStatusCache.Get(ctx, tx, ride.ID)
+		status, err := globalStatusCache.Get(ctx, tx, rideID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 		if status != "COMPLETED" && status != "CANCELED" {
-			if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && status == "ENROUTE" {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "PICKUP"); err != nil {
+			if req.Latitude == coords.PickupLatitude && req.Longitude == coords.PickupLongitude && status == "ENROUTE" {
+				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), rideID, "PICKUP"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -178,8 +182,8 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 				insertedStatus = "PICKUP"
 			}
 
-			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "ARRIVED"); err != nil {
+			if req.Latitude == coords.DestinationLatitude && req.Longitude == coords.DestinationLongitude && status == "CARRYING" {
+				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), rideID, "ARRIVED"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -187,7 +191,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 				insertedStatus = "ARRIVED"
 			}
 		}
-		changedRide = ride
+		changedCoords = coords
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -197,10 +201,10 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 
 	// PICKUP/ARRIVED 遷移時のみ両SSEを起床させ、キャッシュを更新する
 	// （移動のみの座標更新では起床しない）
-	if statusChanged && changedRide != nil {
-		globalStatusCache.Set(changedRide.ID, insertedStatus)
+	if statusChanged {
+		globalStatusCache.Set(changedCoords.RideID, insertedStatus)
 		WakeChair(chair.ID)
-		WakeUser(changedRide.UserID)
+		WakeUser(changedCoords.UserID)
 	}
 
 	globalChairManager.UpdateLocation(chair.ID, req.Latitude, req.Longitude)

@@ -67,6 +67,7 @@ var rideStatusRepository *repository.RideStatusRepository
 var chairRepository *repository.ChairRepository
 var matchingQueueRepository *repository.MatchingQueueRepository
 var globalStatusCache *cache.StatusCache
+var globalRideCoordsCache *cache.RideCoordsCache
 var matcherStarted bool
 
 func main() {
@@ -178,6 +179,20 @@ func setup() http.Handler {
 	globalStatusCache = cache.NewStatusCache(func(ctx context.Context, q cache.Getter, rideID string) (string, error) {
 		return rideStatusRepository.GetLatestStatusByRideID(ctx, q, rideID)
 	})
+	globalRideCoordsCache = cache.NewRideCoordsCache(func(ctx context.Context, rideID string) (cache.RideCoords, error) {
+		ride, err := rideRepository.GetByID(ctx, db, rideID)
+		if err != nil {
+			return cache.RideCoords{}, err
+		}
+		return cache.RideCoords{
+			RideID:               ride.ID,
+			UserID:               ride.UserID,
+			PickupLatitude:       ride.PickupLatitude,
+			PickupLongitude:      ride.PickupLongitude,
+			DestinationLatitude:  ride.DestinationLatitude,
+			DestinationLongitude: ride.DestinationLongitude,
+		}, nil
+	})
 
 	if err := globalChairManager.Reload(context.Background(), db); err != nil {
 		panic(err)
@@ -261,8 +276,9 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// DB初期化で全データが破棄されるため、状態キャッシュもクリアする
+	// DB初期化で全データが破棄されるため、各種キャッシュもクリアする
 	globalStatusCache.Clear()
+	globalRideCoordsCache.Clear()
 
 	// キューに積まれていない未割当MATCHINGライドを救済登録する
 	// （通常は空のはずだが、再起動時などの取りこぼし対策）

@@ -9,15 +9,15 @@ import (
 )
 
 type ChairState struct {
-	ID                   string
-	Name                 string
-	Model                string
-	Speed                int
-	IsActive             bool
-	Latitude             int
-	Longitude            int
-	HasLocation          bool
-	CurrentRideID        string
+	ID            string
+	Name          string
+	Model         string
+	Speed         int
+	IsActive      bool
+	Latitude      int
+	Longitude     int
+	HasLocation   bool
+	CurrentRideID string
 }
 
 type ChairManager struct {
@@ -68,11 +68,11 @@ func (cm *ChairManager) Reload(ctx context.Context, db *sqlx.DB) error {
 			speed = 2
 		}
 		cm.chairs[c.ID] = &ChairState{
-			ID:                      c.ID,
-			Name:                    c.Name,
-			Model:                   c.Model,
-			Speed:                   speed,
-			IsActive:                c.IsActive,
+			ID:       c.ID,
+			Name:     c.Name,
+			Model:    c.Model,
+			Speed:    speed,
+			IsActive: c.IsActive,
 		}
 	}
 
@@ -163,6 +163,20 @@ func (cm *ChairManager) UpdateLocation(chairID string, lat, lon int) {
 		state.Longitude = lon
 		state.HasLocation = true
 	}
+}
+
+// GetCurrentRideID は椅子に割り当て中のライドIDを返す。
+// 未割当時は ok=false。FindBestAvailableChair/Reload で設定され、
+// CompleteRide/UnassignRide でクリアされる。
+func (cm *ChairManager) GetCurrentRideID(chairID string) (rideID string, ok bool) {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	state, ok := cm.chairs[chairID]
+	if !ok || state.CurrentRideID == "" {
+		return "", false
+	}
+	return state.CurrentRideID, true
 }
 
 // GetLocation は椅子の最新既知座標を返す。chairPostCoordinate の
