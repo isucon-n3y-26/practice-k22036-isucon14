@@ -389,17 +389,9 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ride := Ride{}
-	if err := tx.GetContext(ctx, &ride, "SELECT * FROM rides WHERE id = ?", rideID); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	fare, err := calculateDiscountedFare(ctx, tx, user.ID, &ride, req.PickupCoordinate.Latitude, req.PickupCoordinate.Longitude, req.DestinationCoordinate.Latitude, req.DestinationCoordinate.Longitude)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	// 直上で確定させた coupon が手元にあるため再取得せず割引額を直接使う。
+	// 未取得の場合 coupon.Discount はゼロ値(0)で、再取得ミス時と等価。
+	fare := calculateFareWithDiscount(req.PickupCoordinate.Latitude, req.PickupCoordinate.Longitude, req.DestinationCoordinate.Latitude, req.DestinationCoordinate.Longitude, coupon.Discount)
 
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -852,4 +844,8 @@ func calculateDiscountedFare(ctx context.Context, q queryGetter, userID string, 
 	discountedMeteredFare := max(meteredFare-discount, 0)
 
 	return initialFare + discountedMeteredFare, nil
+}
+
+func calculateFareWithDiscount(pickupLatitude, pickupLongitude, destLatitude, destLongitude, discount int) int {
+	return initialFare + max(farePerDistance*calculateDistance(pickupLatitude, pickupLongitude, destLatitude, destLongitude)-discount, 0)
 }
