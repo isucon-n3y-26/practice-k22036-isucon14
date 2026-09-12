@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
@@ -59,6 +60,22 @@ func (r *RideRepository) ListCompletedByUserID(ctx context.Context, q Selecter, 
 		       WHERE rs.ride_id = r.id ORDER BY rs.created_at DESC LIMIT 1) = 'COMPLETED'
 		ORDER BY r.created_at DESC
 	`, userID); err != nil {
+		return nil, err
+	}
+	return rides, nil
+}
+
+// ListCompletedByOwnerID はオーナー配下の椅子の完了ライドをすべて返す。
+// 売上集計用に、椅子毎の取得 N+1 を1クエリにまとめたもの。
+func (r *RideRepository) ListCompletedByOwnerID(ctx context.Context, q Selecter, ownerID string, since, until time.Time) ([]models.Ride, error) {
+	rides := []models.Ride{}
+	if err := q.SelectContext(ctx, &rides, `
+		SELECT r.* FROM rides r
+		INNER JOIN chairs c ON c.id = r.chair_id AND c.owner_id = ?
+		INNER JOIN ride_statuses rs ON rs.ride_id = r.id
+		WHERE rs.status = 'COMPLETED'
+		  AND r.updated_at BETWEEN ? AND ? + INTERVAL 999 MICROSECOND
+	`, ownerID, since, until); err != nil {
 		return nil, err
 	}
 	return rides, nil

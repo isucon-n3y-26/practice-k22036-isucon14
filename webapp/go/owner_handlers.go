@@ -120,14 +120,17 @@ func ownerGetSales(w http.ResponseWriter, r *http.Request) {
 	}
 
 	modelSalesByModel := map[string]int{}
+	allRides, err := rideRepository.ListCompletedByOwnerID(ctx, tx, owner.ID, since, until)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	ridesByChairID := make(map[string][]Ride, len(chairs))
+	for _, ride := range allRides {
+		ridesByChairID[ride.ChairID.String] = append(ridesByChairID[ride.ChairID.String], ride)
+	}
 	for _, chair := range chairs {
-		rides := []Ride{}
-		if err := tx.SelectContext(ctx, &rides, "SELECT rides.* FROM rides JOIN ride_statuses ON rides.id = ride_statuses.ride_id WHERE chair_id = ? AND status = 'COMPLETED' AND updated_at BETWEEN ? AND ? + INTERVAL 999 MICROSECOND", chair.ID, since, until); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		sales := sumSales(rides)
+		sales := sumSales(ridesByChairID[chair.ID])
 		res.TotalSales += sales
 
 		res.Chairs = append(res.Chairs, chairSales{
