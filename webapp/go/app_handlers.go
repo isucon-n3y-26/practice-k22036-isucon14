@@ -195,32 +195,82 @@ type getAppRidesResponseItemChair struct {
 	Model string `json:"model"`
 }
 
+// 完了済みライド履歴を返す。ライド毎の関連取得は3回の一括取得にまとめる。
 func appGetRides(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := ctx.Value("user").(*User)
 
-	tx, err := db.Beginx()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
-	rides, err := rideRepository.ListCompletedByUserID(ctx, tx, user.ID)
+	// 履歴対象の完了ライド一覧
+	rides, err := rideRepository.ListCompletedByUserID(ctx, db, user.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	items := []getAppRidesResponseItem{}
-	for _, ride := range rides {
-		fare, err := calculateDiscountedFare(ctx, tx, user.ID, &ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
+	// 運賃・椅子・オーナー表示用の関連データを一括取得してmap化する
+	discountByRideID := make(map[string]int, len(rides))
+	chairByID := map[string]Chair{}
+	ownerNameByID := map[string]string{}
+	if len(rides) > 0 {
+		rideIDs := make([]string, 0, len(rides))
+		chairIDSet := make(map[string]struct{}, len(rides))
+		for _, ride := range rides {
+			rideIDs = append(rideIDs, ride.ID)
+			chairIDSet[ride.ChairID.String] = struct{}{}
+		}
+
+		// ライドに紐づくクーポンの割引額
+		coupons, err := couponRepository.ListByUsedByIDs(ctx, db, rideIDs)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		for _, coupon := range coupons {
+			if coupon.UsedBy != nil {
+				discountByRideID[*coupon.UsedBy] = coupon.Discount
+			}
+		}
 
-		item := getAppRidesResponseItem{
+		// 配車された椅子（重複排除）
+		chairIDs := make([]string, 0, len(chairIDSet))
+		for id := range chairIDSet {
+			chairIDs = append(chairIDs, id)
+		}
+		chairs, err := chairRepository.ListByIDs(ctx, db, chairIDs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		ownerIDSet := make(map[string]struct{}, len(chairs))
+		for _, chair := range chairs {
+			chairByID[chair.ID] = chair
+			ownerIDSet[chair.OwnerID] = struct{}{}
+		}
+
+		// 椅子の所属オーナー名（重複排除）
+		ownerIDs := make([]string, 0, len(ownerIDSet))
+		for id := range ownerIDSet {
+			ownerIDs = append(ownerIDs, id)
+		}
+		owners, err := ownerRepository.ListByIDs(ctx, db, ownerIDs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		for _, owner := range owners {
+			ownerNameByID[owner.ID] = owner.Name
+		}
+	}
+
+	// 履歴1件ごとに運賃と椅子情報を組み立てる
+	items := []getAppRidesResponseItem{}
+	for _, ride := range rides {
+		// クーポン未使用時はゼロ値(0)で、旧calculateDiscountedFareのミス時と等価
+		fare := calculateFareWithDiscount(ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude, discountByRideID[ride.ID])
+
+		chair := chairByID[ride.ChairID.String]
+
+		items = append(items, getAppRidesResponseItem{
 			ID:                    ride.ID,
 			PickupCoordinate:      Coordinate{Latitude: ride.PickupLatitude, Longitude: ride.PickupLongitude},
 			DestinationCoordinate: Coordinate{Latitude: ride.DestinationLatitude, Longitude: ride.DestinationLongitude},
@@ -228,32 +278,13 @@ func appGetRides(w http.ResponseWriter, r *http.Request) {
 			Evaluation:            *ride.Evaluation,
 			RequestedAt:           ride.CreatedAt.UnixMilli(),
 			CompletedAt:           ride.UpdatedAt.UnixMilli(),
-		}
-
-		item.Chair = getAppRidesResponseItemChair{}
-
-		chair := &Chair{}
-		if err := tx.GetContext(ctx, chair, `SELECT * FROM chairs WHERE id = ?`, ride.ChairID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		item.Chair.ID = chair.ID
-		item.Chair.Name = chair.Name
-		item.Chair.Model = chair.Model
-
-		owner := &Owner{}
-		if err := tx.GetContext(ctx, owner, `SELECT * FROM owners WHERE id = ?`, chair.OwnerID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		item.Chair.Owner = owner.Name
-
-		items = append(items, item)
-	}
-
-	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+			Chair: getAppRidesResponseItemChair{
+				ID:    chair.ID,
+				Name:  chair.Name,
+				Model: chair.Model,
+				Owner: ownerNameByID[chair.OwnerID],
+			},
+		})
 	}
 
 	writeJSON(w, http.StatusOK, &getAppRidesResponse{

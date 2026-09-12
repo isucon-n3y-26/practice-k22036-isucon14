@@ -66,6 +66,8 @@ var rideRepository *repository.RideRepository
 var rideStatusRepository *repository.RideStatusRepository
 var chairRepository *repository.ChairRepository
 var matchingQueueRepository *repository.MatchingQueueRepository
+var couponRepository *repository.CouponRepository
+var ownerRepository *repository.OwnerRepository
 var globalStatusCache *cache.StatusCache
 var globalRideCoordsCache *cache.RideCoordsCache
 var matcherStarted bool
@@ -176,6 +178,8 @@ func setup() http.Handler {
 	rideStatusRepository = repository.NewRideStatusRepository(db)
 	chairRepository = repository.NewChairRepository(db)
 	matchingQueueRepository = repository.NewMatchingQueueRepository(db)
+	couponRepository = repository.NewCouponRepository(db)
+	ownerRepository = repository.NewOwnerRepository(db)
 	globalStatusCache = cache.NewStatusCache(func(ctx context.Context, q cache.Getter, rideID string) (string, error) {
 		return rideStatusRepository.GetLatestStatusByRideID(ctx, q, rideID)
 	})

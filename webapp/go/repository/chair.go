@@ -27,6 +27,23 @@ func (r *ChairRepository) GetByID(ctx context.Context, q Getter, chairID string)
 	return chair, nil
 }
 
+// ListByIDs は指定IDの椅子を一括取得する。履歴表示の N+1 解消用。
+func (r *ChairRepository) ListByIDs(ctx context.Context, q Selecter, chairIDs []string) ([]models.Chair, error) {
+	chairs := []models.Chair{}
+	if len(chairIDs) == 0 {
+		return chairs, nil
+	}
+	// IN (?) にはスライスを1引数で渡す（スカラー展開渡しは余剰引数エラーになる）
+	query, params, err := sqlx.In(`SELECT * FROM chairs WHERE id IN (?)`, chairIDs)
+	if err != nil {
+		return nil, err
+	}
+	if err := q.SelectContext(ctx, &chairs, sqlx.Rebind(sqlx.QUESTION, query), params...); err != nil {
+		return nil, err
+	}
+	return chairs, nil
+}
+
 // GetCompletedStats は椅子の完了ライド数と評価平均を1クエリで取得する。
 // 完了の定義は getChairStats と同一（ARRIVED・CARRYING・COMPLETED の
 // ステータスをすべて含むライドを数える）。
