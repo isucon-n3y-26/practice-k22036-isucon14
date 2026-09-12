@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/oklog/ulid/v2"
 
@@ -126,17 +127,14 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	prevLat, prevLon, hasPrev := globalChairManager.GetLocation(chair.ID)
 
 	chairLocationID := ulid.Make().String()
+	// INSERT直後の再取得はせず、記録時刻はアプリ側時刻を使う。
+	// DBのCURRENT_TIMESTAMPとの差はINSERT前後数ms以内で等価とみなせる。
+	recordedAt := time.Now()
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO chair_locations (id, chair_id, latitude, longitude) VALUES (?, ?, ?, ?)`,
 		chairLocationID, chair.ID, req.Latitude, req.Longitude,
 	); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	location := &ChairLocation{}
-	if err := tx.GetContext(ctx, location, `SELECT * FROM chair_locations WHERE id = ?`, chairLocationID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -210,7 +208,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	globalChairManager.UpdateLocation(chair.ID, req.Latitude, req.Longitude)
 
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
-		RecordedAt: location.CreatedAt.UnixMilli(),
+		RecordedAt: recordedAt.UnixMilli(),
 	})
 }
 
