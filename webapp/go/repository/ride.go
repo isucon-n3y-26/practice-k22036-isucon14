@@ -39,6 +39,19 @@ func (r *RideRepository) GetByID(ctx context.Context, q Getter, rideID string) (
 	return ride, nil
 }
 
+// GetAssignmentByID は割当確認用に id/user_id/chair_id のみを取得する。
+// 存在・割当確認のみが目的のため FOR UPDATE は付けない。
+func (r *RideRepository) GetAssignmentByID(ctx context.Context, q Getter, rideID string) (*models.Ride, error) {
+	ride := &models.Ride{}
+	if err := q.GetContext(ctx, ride,
+		"SELECT id, user_id, chair_id FROM rides WHERE id = ?",
+		rideID,
+	); err != nil {
+		return nil, err
+	}
+	return ride, nil
+}
+
 func (r *RideRepository) GetLatestByUserID(ctx context.Context, q Getter, userID string) (*models.Ride, error) {
 	ride := &models.Ride{}
 	if err := q.GetContext(ctx, ride,
