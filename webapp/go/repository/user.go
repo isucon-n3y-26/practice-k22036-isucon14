@@ -61,3 +61,8 @@ func (r *UserRepository) Create(ctx context.Context, q Queryer, user *models.Use
 	)
 	return err
 }
+
+// ClearCache は認証キャッシュを破棄する。初期化でDBが全消去されるため。
+func (r *UserRepository) ClearCache() {
+	r.cache = sync.Map{}
+}

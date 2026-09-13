@@ -42,6 +42,11 @@ func (r *ChairRepository) GetByAccessToken(ctx context.Context, accessToken stri
 	return chair, nil
 }
 
+// ClearCache は認証キャッシュを破棄する。初期化でDBが全消去されるため。
+func (r *ChairRepository) ClearCache() {
+	r.cache = sync.Map{}
+}
+
 // ListByIDs は指定IDの椅子を一括取得する。履歴表示の N+1 解消用。
 func (r *ChairRepository) ListByIDs(ctx context.Context, q Selecter, chairIDs []string) ([]models.Chair, error) {
 	chairs := []models.Chair{}

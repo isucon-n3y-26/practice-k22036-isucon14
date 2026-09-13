@@ -557,6 +557,7 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 応答の completed_at は履歴表示と同一時計（DB時刻）にするため再取得する
 	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ?`, rideID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, errors.New("ride not found"))
@@ -585,11 +586,7 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		Amount: fare,
 	}
 
-	var paymentGatewayURL string
-	if err := tx.GetContext(ctx, &paymentGatewayURL, "SELECT value FROM settings WHERE name = 'payment_gateway_url'"); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	var paymentGatewayURL = paymentGatewayBaseURL
 
 	if err := requestPaymentGatewayPostPayment(ctx, paymentGatewayURL, paymentToken.Token, paymentGatewayRequest, func() ([]Ride, error) {
 		rides := []Ride{}

@@ -72,6 +72,10 @@ var globalStatusCache *cache.StatusCache
 var globalRideCoordsCache *cache.RideCoordsCache
 var matcherStarted bool
 
+// paymentGatewayBaseURL は決済サーバのURL。初期化時に設定され、以後不変。
+// 評価ごとの settings 取得排除用。
+var paymentGatewayBaseURL string
+
 func main() {
 	configureLogging()
 	mux := setup()
@@ -180,6 +184,10 @@ func setup() http.Handler {
 	matchingQueueRepository = repository.NewMatchingQueueRepository(db)
 	couponRepository = repository.NewCouponRepository(db)
 	ownerRepository = repository.NewOwnerRepository(db)
+	// 決済URLは起動時に読み込み、初期化APIで更新する。以後不変のためキャッシュする。
+	if err := db.GetContext(context.Background(), &paymentGatewayBaseURL, "SELECT value FROM settings WHERE name = 'payment_gateway_url'"); err != nil {
+		slog.Warn("failed to load payment_gateway_url, will be set on initialize", "error", err)
+	}
 	globalStatusCache = cache.NewStatusCache(func(ctx context.Context, q cache.Getter, rideID string) (string, error) {
 		return rideStatusRepository.GetLatestStatusByRideID(ctx, q, rideID)
 	})
@@ -274,6 +282,7 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	paymentGatewayBaseURL = req.PaymentServer
 
 	if err := globalChairManager.Reload(ctx, db); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -283,6 +292,9 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	// DB初期化で全データが破棄されるため、各種キャッシュもクリアする
 	globalStatusCache.Clear()
 	globalRideCoordsCache.Clear()
+	userRepository.ClearCache()
+	chairRepository.ClearCache()
+	ownerRepository.ClearCache()
 
 	// キューに積まれていない未割当MATCHINGライドを救済登録する
 	// （通常は空のはずだが、再起動時などの取りこぼし対策）

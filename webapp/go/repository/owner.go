@@ -31,6 +31,11 @@ func (r *OwnerRepository) GetByAccessToken(ctx context.Context, accessToken stri
 	return owner, nil
 }
 
+// ClearCache は認証キャッシュを破棄する。初期化でDBが全消去されるため。
+func (r *OwnerRepository) ClearCache() {
+	r.cache = sync.Map{}
+}
+
 // ListByIDs は指定IDのオーナーを一括取得する。履歴表示の N+1 解消用。
 func (r *OwnerRepository) ListByIDs(ctx context.Context, q Selecter, ownerIDs []string) ([]models.Owner, error) {
 	owners := []models.Owner{}
