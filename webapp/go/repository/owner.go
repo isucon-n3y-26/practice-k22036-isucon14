@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"sync"
 
 	"github.com/jmoiron/sqlx"
 
@@ -9,11 +10,25 @@ import (
 )
 
 type OwnerRepository struct {
-	db *sqlx.DB
+	db    *sqlx.DB
+	cache sync.Map
 }
 
 func NewOwnerRepository(db *sqlx.DB) *OwnerRepository {
 	return &OwnerRepository{db: db}
+}
+
+// GetByAccessToken はトークン不変のためキャッシュする。認証ミドルウェアの都度SELECT排除用。
+func (r *OwnerRepository) GetByAccessToken(ctx context.Context, accessToken string) (*models.Owner, error) {
+	if v, ok := r.cache.Load(accessToken); ok {
+		return v.(*models.Owner), nil
+	}
+	owner := &models.Owner{}
+	if err := r.db.GetContext(ctx, owner, "SELECT * FROM owners WHERE access_token = ?", accessToken); err != nil {
+		return nil, err
+	}
+	r.cache.Store(accessToken, owner)
+	return owner, nil
 }
 
 // ListByIDs は指定IDのオーナーを一括取得する。履歴表示の N+1 解消用。

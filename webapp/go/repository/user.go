@@ -31,11 +31,16 @@ func (r *UserRepository) GetByID(ctx context.Context, id string) (*models.User, 
 }
 
 func (r *UserRepository) GetByAccessToken(ctx context.Context, accessToken string) (*models.User, error) {
+	// トークンは不変のためキャッシュする。認証ミドルウェアの都度SELECT排除用。
+	if v, ok := r.cache.Load("token:" + accessToken); ok {
+		return v.(*models.User), nil
+	}
 	user := &models.User{}
 	if err := r.db.GetContext(ctx, user, "SELECT * FROM users WHERE access_token = ?", accessToken); err != nil {
 		return nil, err
 	}
 	r.cache.Store(user.ID, user)
+	r.cache.Store("token:"+accessToken, user)
 	return user, nil
 }
 

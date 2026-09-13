@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"sync"
 
 	"github.com/jmoiron/sqlx"
 
@@ -9,7 +10,8 @@ import (
 )
 
 type ChairRepository struct {
-	db *sqlx.DB
+	db    *sqlx.DB
+	cache sync.Map
 }
 
 func NewChairRepository(db *sqlx.DB) *ChairRepository {
@@ -24,6 +26,19 @@ func (r *ChairRepository) GetByID(ctx context.Context, q Getter, chairID string)
 	); err != nil {
 		return nil, err
 	}
+	return chair, nil
+}
+
+// GetByAccessToken はトークン不変のためキャッシュする。認証ミドルウェアの都度SELECT排除用。
+func (r *ChairRepository) GetByAccessToken(ctx context.Context, accessToken string) (*models.Chair, error) {
+	if v, ok := r.cache.Load(accessToken); ok {
+		return v.(*models.Chair), nil
+	}
+	chair := &models.Chair{}
+	if err := r.db.GetContext(ctx, chair, "SELECT * FROM chairs WHERE access_token = ?", accessToken); err != nil {
+		return nil, err
+	}
+	r.cache.Store(accessToken, chair)
 	return chair, nil
 }
 
