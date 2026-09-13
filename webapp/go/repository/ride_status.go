@@ -16,6 +16,15 @@ func NewRideStatusRepository(db *sqlx.DB) *RideStatusRepository {
 	return &RideStatusRepository{db: db}
 }
 
+// Create は状態遷移を1行挿入する。IDはULIDを想定し呼出し側で採番する。
+func (r *RideStatusRepository) Create(ctx context.Context, q Queryer, id, rideID, status string) error {
+	_, err := q.ExecContext(ctx,
+		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
+		id, rideID, status,
+	)
+	return err
+}
+
 func (r *RideStatusRepository) GetOldestUnsentByRideID(ctx context.Context, q Getter, rideID string) (*models.RideStatus, error) {
 	rideStatus := &models.RideStatus{}
 	if err := q.GetContext(ctx, rideStatus,

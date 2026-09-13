@@ -505,15 +505,12 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx, err := db.Beginx()
+	// 決済は外部HTTP（リトライで最大数秒）であり、開いたTXを保持したまま
+	// 呼ぶとロック・コネクションを圧迫するため、書込みTXの前に済ませる。
+	// 決済失敗時は従来どおり何も書込まず500/502を返すため、意味は不変。
+	// リトライ判定のライド一覧は書込み前後で不変のため、TXの代わりにdbで読む。
+	ride, err := rideRepository.GetByID(ctx, db, rideID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
-	ride := &Ride{}
-	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ?`, rideID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, errors.New("ride not found"))
 			return
@@ -521,7 +518,7 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	status, err := globalStatusCache.Get(ctx, tx, ride.ID)
+	status, err := globalStatusCache.Get(ctx, db, ride.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -532,43 +529,8 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := tx.ExecContext(
-		ctx,
-		`UPDATE rides SET evaluation = ? WHERE id = ?`,
-		req.Evaluation, rideID)
+	paymentToken, err := paymentTokenRepository.GetByUserID(ctx, db, ride.UserID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if count, err := result.RowsAffected(); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	} else if count == 0 {
-		writeError(w, http.StatusNotFound, errors.New("ride not found"))
-		return
-	}
-
-	_, err = tx.ExecContext(
-		ctx,
-		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
-		ulid.Make().String(), rideID, "COMPLETED")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	// 応答の completed_at は履歴表示と同一時計（DB時刻）にするため再取得する
-	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ?`, rideID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, errors.New("ride not found"))
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	paymentToken := &PaymentToken{}
-	if err := tx.GetContext(ctx, paymentToken, `SELECT * FROM payment_tokens WHERE user_id = ?`, ride.UserID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusBadRequest, errors.New("payment token not registered"))
 			return
@@ -577,7 +539,7 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fare, err := calculateDiscountedFare(ctx, tx, ride.UserID, ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
+	fare, err := calculateDiscountedFare(ctx, db, ride.UserID, ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -589,14 +551,43 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 	var paymentGatewayURL = paymentGatewayBaseURL
 
 	if err := requestPaymentGatewayPostPayment(ctx, paymentGatewayURL, paymentToken.Token, paymentGatewayRequest, func() ([]Ride, error) {
-		rides := []Ride{}
-		if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE user_id = ? ORDER BY created_at ASC`, ride.UserID); err != nil {
-			return nil, err
-		}
-		return rides, nil
+		return rideRepository.ListByUserID(ctx, db, ride.UserID)
 	}); err != nil {
 		if errors.Is(err, erroredUpstream) {
 			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	tx, err := db.Beginx()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer tx.Rollback()
+
+	count, err := rideRepository.UpdateEvaluation(ctx, tx, rideID, req.Evaluation)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if count == 0 {
+		writeError(w, http.StatusNotFound, errors.New("ride not found"))
+		return
+	}
+
+	if err := rideStatusRepository.Create(ctx, tx, ulid.Make().String(), rideID, "COMPLETED"); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// 応答の completed_at は履歴表示と同一時計（DB時刻）にするため再取得する
+	ride, err = rideRepository.GetByID(ctx, tx, rideID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, errors.New("ride not found"))
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err)
@@ -815,7 +806,6 @@ func calculateFare(pickupLatitude, pickupLongitude, destLatitude, destLongitude 
 }
 
 func calculateDiscountedFare(ctx context.Context, q queryGetter, userID string, ride *Ride, pickupLatitude, pickupLongitude, destLatitude, destLongitude int) (int, error) {
-	var coupon Coupon
 	discount := 0
 	if ride != nil {
 		destLatitude = ride.DestinationLatitude
@@ -824,7 +814,7 @@ func calculateDiscountedFare(ctx context.Context, q queryGetter, userID string, 
 		pickupLongitude = ride.PickupLongitude
 
 		// すでにクーポンが紐づいているならそれの割引額を参照
-		if err := q.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE used_by = ?", ride.ID); err != nil {
+		if coupon, err := couponRepository.GetByUsedBy(ctx, q, ride.ID); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return 0, err
 			}
@@ -833,13 +823,13 @@ func calculateDiscountedFare(ctx context.Context, q queryGetter, userID string, 
 		}
 	} else {
 		// 初回利用クーポンを最優先で使う
-		if err := q.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND code = 'CP_NEW2024' AND used_by IS NULL", userID); err != nil {
+		if coupon, err := couponRepository.GetUnusedNewUserCoupon(ctx, q, userID); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return 0, err
 			}
 
 			// 無いなら他のクーポンを付与された順番に使う
-			if err := q.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1", userID); err != nil {
+			if coupon, err := couponRepository.GetOldestUnused(ctx, q, userID); err != nil {
 				if !errors.Is(err, sql.ErrNoRows) {
 					return 0, err
 				}

@@ -68,6 +68,7 @@ var chairRepository *repository.ChairRepository
 var matchingQueueRepository *repository.MatchingQueueRepository
 var couponRepository *repository.CouponRepository
 var ownerRepository *repository.OwnerRepository
+var paymentTokenRepository *repository.PaymentTokenRepository
 var globalStatusCache *cache.StatusCache
 var globalRideCoordsCache *cache.RideCoordsCache
 var matcherStarted bool
@@ -184,6 +185,7 @@ func setup() http.Handler {
 	matchingQueueRepository = repository.NewMatchingQueueRepository(db)
 	couponRepository = repository.NewCouponRepository(db)
 	ownerRepository = repository.NewOwnerRepository(db)
+	paymentTokenRepository = repository.NewPaymentTokenRepository(db)
 	// 決済URLは起動時に読み込み、初期化APIで更新する。以後不変のためキャッシュする。
 	if err := db.GetContext(context.Background(), &paymentGatewayBaseURL, "SELECT value FROM settings WHERE name = 'payment_gateway_url'"); err != nil {
 		slog.Warn("failed to load payment_gateway_url, will be set on initialize", "error", err)

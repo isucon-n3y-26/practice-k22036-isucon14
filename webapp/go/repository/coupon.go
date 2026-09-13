@@ -16,6 +16,43 @@ func NewCouponRepository(db *sqlx.DB) *CouponRepository {
 	return &CouponRepository{db: db}
 }
 
+// GetByUsedBy はライドに紐づくクーポンを返す。未使用時は sql.ErrNoRows。
+// 運賃計算で割引額参照用。
+func (r *CouponRepository) GetByUsedBy(ctx context.Context, q Getter, rideID string) (*models.Coupon, error) {
+	coupon := &models.Coupon{}
+	if err := q.GetContext(ctx, coupon,
+		"SELECT * FROM coupons WHERE used_by = ?",
+		rideID,
+	); err != nil {
+		return nil, err
+	}
+	return coupon, nil
+}
+
+// GetUnusedNewUserCoupon は未使用の初回利用クーポンを返す。無い時は sql.ErrNoRows。
+func (r *CouponRepository) GetUnusedNewUserCoupon(ctx context.Context, q Getter, userID string) (*models.Coupon, error) {
+	coupon := &models.Coupon{}
+	if err := q.GetContext(ctx, coupon,
+		"SELECT * FROM coupons WHERE user_id = ? AND code = 'CP_NEW2024' AND used_by IS NULL",
+		userID,
+	); err != nil {
+		return nil, err
+	}
+	return coupon, nil
+}
+
+// GetOldestUnused は未使用クーポンを付与順で1件返す。無い時は sql.ErrNoRows。
+func (r *CouponRepository) GetOldestUnused(ctx context.Context, q Getter, userID string) (*models.Coupon, error) {
+	coupon := &models.Coupon{}
+	if err := q.GetContext(ctx, coupon,
+		"SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1",
+		userID,
+	); err != nil {
+		return nil, err
+	}
+	return coupon, nil
+}
+
 // ListByUsedByIDs は指定ライドに紐づくクーポンを一括取得する。履歴表示の N+1 解消用。
 func (r *CouponRepository) ListByUsedByIDs(ctx context.Context, q Selecter, rideIDs []string) ([]models.Coupon, error) {
 	coupons := []models.Coupon{}

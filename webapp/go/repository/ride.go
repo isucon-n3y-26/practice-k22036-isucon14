@@ -141,3 +141,25 @@ func (r *RideRepository) UpdateChairID(ctx context.Context, q Queryer, rideID, c
 	_, err := q.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", chairID, rideID)
 	return err
 }
+
+// UpdateEvaluation は評価値を更新し、更新行数を返す。0件の場合は不存在扱い。
+func (r *RideRepository) UpdateEvaluation(ctx context.Context, q Queryer, rideID string, evaluation int) (int64, error) {
+	result, err := q.ExecContext(ctx, "UPDATE rides SET evaluation = ? WHERE id = ?", evaluation, rideID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// ListByUserID はユーザーのライドを作成昇順で返す。
+// 決済リトライ時の件数照合用で、評価の書込み前後で内容は不変のためTX外で読める。
+func (r *RideRepository) ListByUserID(ctx context.Context, q Selecter, userID string) ([]models.Ride, error) {
+	rides := []models.Ride{}
+	if err := q.SelectContext(ctx, &rides,
+		`SELECT * FROM rides WHERE user_id = ? ORDER BY created_at ASC`,
+		userID,
+	); err != nil {
+		return nil, err
+	}
+	return rides, nil
+}
