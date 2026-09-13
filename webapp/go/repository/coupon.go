@@ -32,3 +32,33 @@ func (r *CouponRepository) ListByUsedByIDs(ctx context.Context, q Selecter, ride
 	}
 	return coupons, nil
 }
+
+func (r *CouponRepository) Create(ctx context.Context, q Queryer, coupon *models.Coupon) error {
+	_, err := q.ExecContext(
+		ctx,
+		"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?)",
+		coupon.UserID, coupon.Code, coupon.Discount,
+	)
+	return err
+}
+
+// CountByCodeForUpdate は指定コードのクーポン件数を返す。招待上限チェック用で、
+// 直列化のため FOR UPDATE を維持する（取得は SELECT 1 のみで件数は len で数える）。
+func (r *CouponRepository) CountByCodeForUpdate(ctx context.Context, q Selecter, code string) (int, error) {
+	var ones []int
+	if err := q.SelectContext(ctx, &ones, "SELECT 1 FROM coupons WHERE code = ? FOR UPDATE", code); err != nil {
+		return 0, err
+	}
+	return len(ones), nil
+}
+
+// CreateInvitationPair は招待クーポンと招待者Rewardを1文で付与する。
+func (r *CouponRepository) CreateInvitationPair(ctx context.Context, q Queryer, userID, invitationCode, inviterID string) error {
+	_, err := q.ExecContext(
+		ctx,
+		"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?), (?, CONCAT(?, '_', FLOOR(UNIX_TIMESTAMP(NOW(3))*1000)), ?)",
+		userID, "INV_"+invitationCode, 1500,
+		inviterID, "RWD_"+invitationCode, 1000,
+	)
+	return err
+}

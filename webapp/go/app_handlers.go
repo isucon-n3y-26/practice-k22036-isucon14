@@ -67,12 +67,11 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 初回登録キャンペーンのクーポンを付与
-	_, err = tx.ExecContext(
-		ctx,
-		"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?)",
-		userID, "CP_NEW2024", 3000,
-	)
-	if err != nil {
+	if err := couponRepository.Create(ctx, tx, &Coupon{
+		UserID:   userID,
+		Code:     "CP_NEW2024",
+		Discount: 3000,
+	}); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -80,13 +79,12 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 	// 招待コードを使った登録
 	if req.InvitationCode != nil && *req.InvitationCode != "" {
 		// 招待する側の招待数をチェック
-		var coupons []Coupon
-		err = tx.SelectContext(ctx, &coupons, "SELECT * FROM coupons WHERE code = ? FOR UPDATE", "INV_"+*req.InvitationCode)
+		inviteCount, err := couponRepository.CountByCodeForUpdate(ctx, tx, "INV_"+*req.InvitationCode)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		if len(coupons) >= 3 {
+		if inviteCount >= 3 {
 			writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
 			return
 		}
@@ -102,23 +100,8 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 招待クーポン付与
-		_, err = tx.ExecContext(
-			ctx,
-			"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?)",
-			userID, "INV_"+*req.InvitationCode, 1500,
-		)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		// 招待した人にもRewardを付与
-		_, err = tx.ExecContext(
-			ctx,
-			"INSERT INTO coupons (user_id, code, discount) VALUES (?, CONCAT(?, '_', FLOOR(UNIX_TIMESTAMP(NOW(3))*1000)), ?)",
-			inviter.ID, "RWD_"+*req.InvitationCode, 1000,
-		)
-		if err != nil {
+		// 招待クーポン付与と招待した人へのReward付与を1文にまとめる
+		if err := couponRepository.CreateInvitationPair(ctx, tx, userID, *req.InvitationCode, inviter.ID); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
