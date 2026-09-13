@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"database/sql"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
@@ -110,6 +112,35 @@ func (r *RideStatusRepository) MarkAppSent(ctx context.Context, q Queryer, id st
 		id,
 	)
 	return err
+}
+
+// UnsentStatusRow は未送信行の backfill 用1行。配送先解決のため rides を結合する。
+type UnsentStatusRow struct {
+	ID          string         `db:"id"`
+	RideID      string         `db:"ride_id"`
+	Status      string         `db:"status"`
+	CreatedAt   time.Time      `db:"created_at"`
+	AppSentAt   *time.Time     `db:"app_sent_at"`
+	ChairSentAt *time.Time     `db:"chair_sent_at"`
+	UserID      string         `db:"user_id"`
+	ChairID     sql.NullString `db:"chair_id"`
+}
+
+// ListUnsent は椅子・ユーザーのどちらかが未送信の行を時系列昇順で返す。
+// インメモリ未送信ログの起動時・初期化時復元用。
+func (r *RideStatusRepository) ListUnsent(ctx context.Context, q Selecter) ([]UnsentStatusRow, error) {
+	rows := []UnsentStatusRow{}
+	if err := q.SelectContext(ctx, &rows, `
+		SELECT rs.id, rs.ride_id, rs.status, rs.created_at,
+		       rs.app_sent_at, rs.chair_sent_at, r.user_id, r.chair_id
+		FROM ride_statuses rs
+		INNER JOIN rides r ON r.id = rs.ride_id
+		WHERE rs.chair_sent_at IS NULL OR rs.app_sent_at IS NULL
+		ORDER BY rs.created_at ASC
+	`); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func (r *RideStatusRepository) MarkChairSent(ctx context.Context, q Queryer, id string) error {

@@ -72,6 +72,7 @@ var paymentTokenRepository *repository.PaymentTokenRepository
 var globalStatusCache *cache.StatusCache
 var globalRideCoordsCache *cache.RideCoordsCache
 var globalLocationBuffer *LocationBuffer
+var globalStatusLog *StatusLog
 var matcherStarted bool
 
 // paymentGatewayBaseURL は決済サーバのURL。初期化時に設定され、以後不変。
@@ -189,6 +190,7 @@ func setup() http.Handler {
 	paymentTokenRepository = repository.NewPaymentTokenRepository(db)
 	globalLocationBuffer = NewLocationBuffer(db)
 	go globalLocationBuffer.Start(context.Background())
+	globalStatusLog = NewStatusLog()
 	// 決済URLは起動時に読み込み、初期化APIで更新する。以後不変のためキャッシュする。
 	if err := db.GetContext(context.Background(), &paymentGatewayBaseURL, "SELECT value FROM settings WHERE name = 'payment_gateway_url'"); err != nil {
 		slog.Warn("failed to load payment_gateway_url, will be set on initialize", "error", err)
@@ -212,6 +214,9 @@ func setup() http.Handler {
 	})
 
 	if err := globalChairManager.Reload(context.Background(), db); err != nil {
+		panic(err)
+	}
+	if err := reloadStatusLog(context.Background()); err != nil {
 		panic(err)
 	}
 
@@ -270,6 +275,17 @@ type postInitializeResponse struct {
 	Language string `json:"language"`
 }
 
+// reloadStatusLog は未送信行をDBから未送信ログへ復元する。
+// 起動時・初期化 billet用。呼出し前に Clear すること。
+func reloadStatusLog(ctx context.Context) error {
+	rows, err := rideStatusRepository.ListUnsent(ctx, db)
+	if err != nil {
+		return err
+	}
+	globalStatusLog.Backfill(rows)
+	return nil
+}
+
 func postInitialize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	req := &postInitializeRequest{}
@@ -298,6 +314,11 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	globalStatusCache.Clear()
 	globalRideCoordsCache.Clear()
 	globalLocationBuffer.Discard()
+	globalStatusLog.Clear()
+	if err := reloadStatusLog(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	userRepository.ClearCache()
 	chairRepository.ClearCache()
 	ownerRepository.ClearCache()

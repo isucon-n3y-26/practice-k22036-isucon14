@@ -74,6 +74,7 @@ func doMatching(ctx context.Context) (int, int, error) {
 	}
 
 	var assignedChairIDs []string
+	var assignedRideIDs []string
 	for _, ride := range rides {
 		// 2. メモリ上から最適な空き椅子を探索
 		matched, ok := globalChairManager.FindBestAvailableChair(ride.PickupLatitude, ride.PickupLongitude, ride.ID)
@@ -82,6 +83,7 @@ func doMatching(ctx context.Context) (int, int, error) {
 			continue
 		}
 		assignedChairIDs = append(assignedChairIDs, matched.ID)
+		assignedRideIDs = append(assignedRideIDs, ride.ID)
 
 		// 3. ライドに椅子を割り当て、キューから取り除く
 		if err := rideRepository.UpdateChairID(ctx, tx, ride.ID, matched.ID); err != nil {
@@ -111,7 +113,9 @@ func doMatching(ctx context.Context) (int, int, error) {
 	}
 
 	// 割当により椅子向けSSEで可視になったMATCHINGを通知する
-	for _, cid := range assignedChairIDs {
+	// 未送信ログの配送先設定は wake より先に行う
+	for i, cid := range assignedChairIDs {
+		globalStatusLog.SetChair(assignedRideIDs[i], cid)
 		WakeChair(cid)
 	}
 

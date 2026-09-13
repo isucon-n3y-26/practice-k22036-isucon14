@@ -328,10 +328,11 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	matchingStatusID := ulid.Make().String()
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
-		ulid.Make().String(), rideID, "MATCHING",
+		matchingStatusID, rideID, "MATCHING",
 	); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -413,6 +414,8 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// MATCHING 作成をユーザー向けSSEに通知する（接続済みフロント用）
+	// 未送信ログへの登録は wake より先に行い、起床後の取得漏れを防ぐ
+	globalStatusLog.Append(matchingStatusID, rideID, "MATCHING", user.ID, "", time.Now())
 	WakeUser(user.ID)
 	globalStatusCache.Set(rideID, "MATCHING")
 
@@ -578,7 +581,8 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := rideStatusRepository.Create(ctx, tx, ulid.Make().String(), rideID, "COMPLETED"); err != nil {
+	completedStatusID := ulid.Make().String()
+	if err := rideStatusRepository.Create(ctx, tx, completedStatusID, rideID, "COMPLETED"); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -604,6 +608,12 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// COMPLETED 作成を両SSEに通知する
+	// 未送信ログへの登録は wake より先に行い、起床後の取得漏れを防ぐ
+	chairID := ""
+	if ride.ChairID.Valid {
+		chairID = ride.ChairID.String
+	}
+	globalStatusLog.Append(completedStatusID, rideID, "COMPLETED", ride.UserID, chairID, time.Now())
 	WakeUser(ride.UserID)
 	if ride.ChairID.Valid {
 		WakeChair(ride.ChairID.String)
@@ -660,7 +670,9 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 	StreamRideNotifications(
 		stream,
 		func(ctx context.Context) ([]RideStatus, error) {
-			return rideStatusRepository.ListUnsentAppByUserID(ctx, db, user.ID, sseUnsentBatchSize)
+			// 未送信はインメモリの StatusLog から取得する（DBポーリング排除）。
+			// 全遷移が commit 後・wake 前に Append されるため等価。
+			return globalStatusLog.ListUnsentForUser(user.ID, sseUnsentBatchSize), nil
 		},
 		func(ctx context.Context) (*Ride, string, error) {
 			// 接続直後は即座に最新のライド状態を送信する
@@ -681,6 +693,8 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 			return buildAppNotificationData(ctx, db, user.ID, ride, status)
 		},
 		func(ctx context.Context, id string) error {
+			// メモリ追跡の解除とDBの送信済みUPDATEを併用する
+			globalStatusLog.MarkAppSent(id)
 			return rideStatusRepository.MarkAppSent(ctx, db, id)
 		},
 		wake,

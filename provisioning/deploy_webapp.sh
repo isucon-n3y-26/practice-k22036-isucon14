@@ -129,7 +129,22 @@ rsync -az \
   "ubuntu@${PUBLIC_IP}:/etc/nginx/sites-available/isuride.conf"
 
 # ------------------------------------------------------------------------------
-# 4.6 webapp/mysql/conf.d を /etc/mysql/conf.d に同期（root所有のため
+# 4.6 webapp/nginx/nginx.conf を /etc/nginx/nginx.conf に同期(単一ファイル)
+#     events{worker_connections} は conf.d 配下に書けないため本体を管理する。
+#     初回のみリモートの現行ファイルを .bak に退避する。
+# ------------------------------------------------------------------------------
+printf '\n==> Syncing nginx nginx.conf to %s (%s)\n' "${TARGET}" "${PUBLIC_IP}"
+remote bash -s <<'REMOTE_SCRIPT'
+set -Eeuo pipefail
+if [ ! -f /etc/nginx/nginx.conf.bak ]; then
+  sudo cp -p /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak
+fi
+REMOTE_SCRIPT
+rsync -az \
+  -e "ssh ${SSH_OPTS[*]}" \
+  --rsync-path="sudo rsync" \
+  "${ROOT_DIR}/webapp/nginx/nginx.conf" \
+  "ubuntu@${PUBLIC_IP}:/etc/nginx/nginx.conf"
 #     リモート側のrsyncをsudoで実行する）し、mysql を再起動する
 # ------------------------------------------------------------------------------
 printf '\n==> Syncing mysql conf.d to %s (%s)\n' "${TARGET}" "${PUBLIC_IP}"

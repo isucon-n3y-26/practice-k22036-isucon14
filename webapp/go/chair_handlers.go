@@ -156,6 +156,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	rideID, hasRide := globalChairManager.GetCurrentRideID(chair.ID)
 	statusChanged := false
 	insertedStatus := ""
+	insertedStatusID := ""
 	var changedCoords cache.RideCoords
 	if !hasRide {
 		// 未割当時は GetLatestByChairID が ErrNoRows の場合と同等で遷移判定不要
@@ -172,7 +173,8 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		}
 		if status != "COMPLETED" && status != "CANCELED" {
 			if req.Latitude == coords.PickupLatitude && req.Longitude == coords.PickupLongitude && status == "ENROUTE" {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), rideID, "PICKUP"); err != nil {
+				insertedStatusID = ulid.Make().String()
+				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", insertedStatusID, rideID, "PICKUP"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -181,7 +183,8 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if req.Latitude == coords.DestinationLatitude && req.Longitude == coords.DestinationLongitude && status == "CARRYING" {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), rideID, "ARRIVED"); err != nil {
+				insertedStatusID = ulid.Make().String()
+				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", insertedStatusID, rideID, "ARRIVED"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -201,6 +204,8 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	// （移動のみの座標更新では起床しない）
 	if statusChanged {
 		globalStatusCache.Set(changedCoords.RideID, insertedStatus)
+		// 未送信ログへの登録は wake より先に行い、起床後の取得漏れを防ぐ
+		globalStatusLog.Append(insertedStatusID, changedCoords.RideID, insertedStatus, changedCoords.UserID, chair.ID, time.Now())
 		WakeChair(chair.ID)
 		WakeUser(changedCoords.UserID)
 	}
@@ -245,7 +250,9 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	StreamRideNotifications(
 		stream,
 		func(ctx context.Context) ([]RideStatus, error) {
-			return rideStatusRepository.ListUnsentChairByChairID(ctx, db, chair.ID, sseUnsentBatchSize)
+			// 未送信はインメモリの StatusLog から取得する（DBポーリング排除）。
+			// 全遷移が commit 後・wake 前に Append されるため等価。
+			return globalStatusLog.ListUnsentForChair(chair.ID, sseUnsentBatchSize), nil
 		},
 		func(ctx context.Context) (*Ride, string, error) {
 			// 接続直後は即座に最新のライド状態を送信する
@@ -266,6 +273,8 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 			return buildChairNotificationData(ctx, ride, status)
 		},
 		func(ctx context.Context, id string) error {
+			// メモリ追跡の解除とDBの送信済みUPDATEを併用する
+			globalStatusLog.MarkChairSent(id)
 			return rideStatusRepository.MarkChairSent(ctx, db, id)
 		},
 		wake,
@@ -334,10 +343,13 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 未送信ログ用の状態ID。commit 後・wake 前に Append するため保持する
+	statusID := ""
 	switch req.Status {
 	// Acknowledge the ride
 	case "ENROUTE":
-		if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "ENROUTE"); err != nil {
+		statusID = ulid.Make().String()
+		if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", statusID, ride.ID, "ENROUTE"); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -352,7 +364,8 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, errors.New("chair has not arrived yet"))
 			return
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "CARRYING"); err != nil {
+		statusID = ulid.Make().String()
+		if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", statusID, ride.ID, "CARRYING"); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -367,6 +380,8 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ENROUTE/CARRYING 遷移を両SSEに通知し、キャッシュを更新する
+	// 未送信ログへの登録は wake より先に行い、起床後の取得漏れを防ぐ
+	globalStatusLog.Append(statusID, ride.ID, req.Status, ride.UserID, chair.ID, time.Now())
 	WakeChair(chair.ID)
 	WakeUser(ride.UserID)
 	globalStatusCache.Set(ride.ID, req.Status)
