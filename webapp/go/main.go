@@ -71,6 +71,7 @@ var ownerRepository *repository.OwnerRepository
 var paymentTokenRepository *repository.PaymentTokenRepository
 var globalStatusCache *cache.StatusCache
 var globalRideCoordsCache *cache.RideCoordsCache
+var globalLocationBuffer *LocationBuffer
 var matcherStarted bool
 
 // paymentGatewayBaseURL は決済サーバのURL。初期化時に設定され、以後不変。
@@ -186,6 +187,8 @@ func setup() http.Handler {
 	couponRepository = repository.NewCouponRepository(db)
 	ownerRepository = repository.NewOwnerRepository(db)
 	paymentTokenRepository = repository.NewPaymentTokenRepository(db)
+	globalLocationBuffer = NewLocationBuffer(db)
+	go globalLocationBuffer.Start(context.Background())
 	// 決済URLは起動時に読み込み、初期化APIで更新する。以後不変のためキャッシュする。
 	if err := db.GetContext(context.Background(), &paymentGatewayBaseURL, "SELECT value FROM settings WHERE name = 'payment_gateway_url'"); err != nil {
 		slog.Warn("failed to load payment_gateway_url, will be set on initialize", "error", err)
@@ -294,6 +297,7 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	// DB初期化で全データが破棄されるため、各種キャッシュもクリアする
 	globalStatusCache.Clear()
 	globalRideCoordsCache.Clear()
+	globalLocationBuffer.Discard()
 	userRepository.ClearCache()
 	chairRepository.ClearCache()
 	ownerRepository.ClearCache()

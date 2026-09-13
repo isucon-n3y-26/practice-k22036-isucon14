@@ -127,17 +127,17 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	prevLat, prevLon, hasPrev := globalChairManager.GetLocation(chair.ID)
 
 	chairLocationID := ulid.Make().String()
-	// INSERT直後の再取得はせず、記録時刻はアプリ側時刻を使う。
-	// DBのCURRENT_TIMESTAMPとの差はINSERT前後数ms以内で等価とみなせる。
+	// 位置行のINSERTは後追いバッチ化する。実行時の読手は存在せず
+	// （最新位置は ChairManager、応答時刻は下の recordedAt）、
+	// created_at はこの瞬間の時刻を明示挿入して等価に保つ。
 	recordedAt := time.Now()
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO chair_locations (id, chair_id, latitude, longitude) VALUES (?, ?, ?, ?)`,
-		chairLocationID, chair.ID, req.Latitude, req.Longitude,
-	); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
+	globalLocationBuffer.Append(locationEntry{
+		ID:        chairLocationID,
+		ChairID:   chair.ID,
+		Latitude:  req.Latitude,
+		Longitude: req.Longitude,
+		CreatedAt: recordedAt,
+	})
 
 	// 走行距離を累積
 	if hasPrev {
