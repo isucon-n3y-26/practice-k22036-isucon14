@@ -1,0 +1,7 @@
+# contestant-02 (db) 用オーバーレイ
+# DB専用ホストとして app(01) からのリモート接続を受け付ける。
+# provisioning/deploy_webapp.sh が /etc/mysql/mysql.conf.d/ に同期する。
+# (ファイル名の z- prefix は /etc/mysql/mysql.conf.d 内で mysqld.cnf より
+#  後に読まれるためのもの。辞書順 i < m のため isuride-*.cnf では上書きされる)
+[mysqld]
+bind-address = 0.0.0.0

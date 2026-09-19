@@ -33,6 +33,22 @@ resource "aws_security_group" "contestant" {
     }
   }
 
+  ingress {
+    description = "MySQL between contestant hosts (01 app to 02 db)"
+    protocol    = "tcp"
+    from_port   = 3306
+    to_port     = 3306
+    self        = true
+  }
+
+  ingress {
+    description = "Go app proxy between contestant hosts (03 edge to 01 app)"
+    protocol    = "tcp"
+    from_port   = 8080
+    to_port     = 8080
+    self        = true
+  }
+
   egress {
     description = "All outbound traffic"
     protocol    = "-1"

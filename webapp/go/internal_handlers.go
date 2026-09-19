@@ -2,12 +2,25 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 var matchSignal = make(chan struct{}, 1)
+
+// isRetryableDBError は deadlock (1213) / lock wait timeout (1205) を
+// 検出し、トランザクション再試行の可否を返す。
+func isRetryableDBError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1213 || mysqlErr.Number == 1205
+	}
+	return false
+}
 
 func triggerMatching() {
 	select {

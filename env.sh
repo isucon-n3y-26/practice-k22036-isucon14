@@ -1,3 +1,5 @@
+# ISUCON_DB_HOST はデプロイ時に02の実IPへ展開される(provisioning/deploy_webapp.sh)。
+# repo上の値は単体動作向けのデフォルト。
 ISUCON_DB_HOST="127.0.0.1"
 ISUCON_DB_PORT="3306"
 ISUCON_DB_USER="isucon"

@@ -1,0 +1,23 @@
+# contestant-01 (app) 用オーバーレイ
+# provisioned unit (/etc/systemd/system/isuride-go.service) の複製。
+# 差分: DBが02に分離されたため Requires=mysql.service / After=mysql.service を除去。
+# (除去しないと01上の mysql 停止時にappまで連動停止する)
+[Unit]
+Description=isuride-go
+After=syslog.target
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/isucon/webapp/go
+EnvironmentFile=/home/isucon/env.sh
+
+User=isucon
+Group=isucon
+ExecStart=/home/isucon/webapp/go/isuride
+ExecStop=/bin/kill -s QUIT $MAINPID
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

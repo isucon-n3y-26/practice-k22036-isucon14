@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"hash/fnv"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -42,72 +44,27 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := ulid.Make().String()
-	accessToken := secureRandomStr(32)
-	invitationCode := secureRandomStr(15)
-
-	tx, err := db.Beginx()
+	// deadlock (1213) / lock wait timeout (1205) は backoff 付きで再試行する
+	var userID, accessToken, invitationCode string
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		userID, accessToken, invitationCode, err = insertUserTx(ctx, req)
+		if err == nil {
+			break
+		}
+		if errors.Is(err, errInvitationInvalid) {
+			break
+		}
+		if !isRetryableDBError(err) || attempt == 4 {
+			break
+		}
+		retryBackoff(attempt + 1)
+	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
-	if err := userRepository.Create(ctx, tx, &User{
-		ID:             userID,
-		Username:       req.Username,
-		Firstname:      req.FirstName,
-		Lastname:       req.LastName,
-		DateOfBirth:    req.DateOfBirth,
-		AccessToken:    accessToken,
-		InvitationCode: invitationCode,
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	// 初回登録キャンペーンのクーポンを付与
-	if err := couponRepository.Create(ctx, tx, &Coupon{
-		UserID:   userID,
-		Code:     "CP_NEW2024",
-		Discount: 3000,
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	// 招待コードを使った登録
-	if req.InvitationCode != nil && *req.InvitationCode != "" {
-		// 招待する側の招待数をチェック
-		inviteCount, err := couponRepository.CountByCodeForUpdate(ctx, tx, "INV_"+*req.InvitationCode)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
+		if errors.Is(err, errInvitationInvalid) {
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		if inviteCount >= 3 {
-			writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
-			return
-		}
-
-		// ユーザーチェック
-		inviter, err := userRepository.GetByInvitationCode(ctx, *req.InvitationCode)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		// 招待クーポン付与と招待した人へのReward付与を1文にまとめる
-		if err := couponRepository.CreateInvitationPair(ctx, tx, userID, *req.InvitationCode, inviter.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -122,6 +79,98 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 		ID:             userID,
 		InvitationCode: invitationCode,
 	})
+}
+
+var errInvitationInvalid = errors.New("この招待コードは使用できません。")
+
+// 招待コード単位の直列化用ストライプドロック。
+// 同一コードへのburst登録による coupons デッドロックをアプリ側で抑止する。
+// (単一appプロセス前提。invite上限3の判定とINSERTを同一コード毎に直列化する)
+var inviteLocks [256]sync.Mutex
+
+func inviteLockFor(code string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(code))
+	return &inviteLocks[h.Sum32()%uint32(len(inviteLocks))]
+}
+
+// retryBackoff は deadlock 再試行前の待機。再試行同士の再衝突を避けるため逓増させる。
+func retryBackoff(attempt int) {
+	time.Sleep(time.Duration(attempt*attempt*5+attempt) * time.Millisecond)
+}
+
+// insertUserTx はユーザー登録〜クーポン付与〜COMMITまでを行う。
+// deadlock等の再試行は呼出側(appPostUsers)が行う。
+func insertUserTx(ctx context.Context, req *appPostUsersRequest) (userID, accessToken, invitationCode string, err error) {
+	userID = ulid.Make().String()
+	accessToken = secureRandomStr(32)
+	invitationCode = secureRandomStr(15)
+
+	// 招待コード付き登録は同一コード毎に直列化し、coupons の burst deadlock を抑止する
+	if req.InvitationCode != nil && *req.InvitationCode != "" {
+		lk := inviteLockFor("INV_" + *req.InvitationCode)
+		lk.Lock()
+		defer lk.Unlock()
+	}
+
+	tx, err := db.Beginx()
+	if err != nil {
+		return "", "", "", err
+	}
+	defer tx.Rollback()
+
+	if err := userRepository.Create(ctx, tx, &User{
+		ID:             userID,
+		Username:       req.Username,
+		Firstname:      req.FirstName,
+		Lastname:       req.LastName,
+		DateOfBirth:    req.DateOfBirth,
+		AccessToken:    accessToken,
+		InvitationCode: invitationCode,
+	}); err != nil {
+		return "", "", "", err
+	}
+
+	// 初回登録キャンペーンのクーポンを付与
+	if err := couponRepository.Create(ctx, tx, &Coupon{
+		UserID:   userID,
+		Code:     "CP_NEW2024",
+		Discount: 3000,
+	}); err != nil {
+		return "", "", "", err
+	}
+
+	// 招待コードを使った登録
+	if req.InvitationCode != nil && *req.InvitationCode != "" {
+		// 招待する側の招待数をチェック
+		inviteCount, err := couponRepository.CountByCodeForUpdate(ctx, tx, "INV_"+*req.InvitationCode)
+		if err != nil {
+			return "", "", "", err
+		}
+		if inviteCount >= 3 {
+			return "", "", "", errInvitationInvalid
+		}
+
+		// ユーザーチェック
+		inviter, err := userRepository.GetByInvitationCode(ctx, *req.InvitationCode)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", "", "", errInvitationInvalid
+			}
+			return "", "", "", err
+		}
+
+		// 招待クーポン付与と招待した人へのReward付与を1文にまとめる
+		if err := couponRepository.CreateInvitationPair(ctx, tx, userID, *req.InvitationCode, inviter.ID); err != nil {
+			return "", "", "", err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", "", "", err
+	}
+
+	return userID, accessToken, invitationCode, nil
 }
 
 type appPostPaymentMethodsRequest struct {
@@ -298,119 +347,25 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := ctx.Value("user").(*User)
-	rideID := ulid.Make().String()
 
-	tx, err := db.Beginx()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
-	continuingRideCount, err := rideRepository.CountContinuingByUserID(ctx, tx, user.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	if continuingRideCount > 0 {
-		writeError(w, http.StatusConflict, errors.New("ride already exists"))
-		return
-	}
-
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO rides (id, user_id, pickup_latitude, pickup_longitude, destination_latitude, destination_longitude)
-				  VALUES (?, ?, ?, ?, ?, ?)`,
-		rideID, user.ID, req.PickupCoordinate.Latitude, req.PickupCoordinate.Longitude, req.DestinationCoordinate.Latitude, req.DestinationCoordinate.Longitude,
-	); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	matchingStatusID := ulid.Make().String()
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
-		matchingStatusID, rideID, "MATCHING",
-	); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	// マッチング待ちキューに登録する（同一トランザクション）
-	if err := matchingQueueRepository.Enqueue(ctx, tx, rideID); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	var rideCount int
-	if err := tx.GetContext(ctx, &rideCount, `SELECT COUNT(*) FROM rides WHERE user_id = ? `, user.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	var coupon Coupon
-	if rideCount == 1 {
-		// 初回利用で、初回利用クーポンがあれば必ず使う
-		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND code = 'CP_NEW2024' AND used_by IS NULL FOR UPDATE", user.ID); err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
-
-			// 無ければ他のクーポンを付与された順番に使う
-			if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE", user.ID); err != nil {
-				if !errors.Is(err, sql.ErrNoRows) {
-					writeError(w, http.StatusInternalServerError, err)
-					return
-				}
-			} else {
-				if _, err := tx.ExecContext(
-					ctx,
-					"UPDATE coupons SET used_by = ? WHERE user_id = ? AND code = ?",
-					rideID, user.ID, coupon.Code,
-				); err != nil {
-					writeError(w, http.StatusInternalServerError, err)
-					return
-				}
-			}
-		} else {
-			if _, err := tx.ExecContext(
-				ctx,
-				"UPDATE coupons SET used_by = ? WHERE user_id = ? AND code = 'CP_NEW2024'",
-				rideID, user.ID,
-			); err != nil {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
+	// deadlock (1213) / lock wait timeout (1205) は backoff 付きで再試行する
+	var rideID, matchingStatusID string
+	var fare int
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		rideID, matchingStatusID, fare, err = insertRideTx(ctx, user, req)
+		if err == nil {
+			break
 		}
-	} else {
-		// 他のクーポンを付与された順番に使う
-		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE", user.ID); err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
-		} else {
-			if _, err := tx.ExecContext(
-				ctx,
-				"UPDATE coupons SET used_by = ? WHERE user_id = ? AND code = ?",
-				rideID, user.ID, coupon.Code,
-			); err != nil {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
+		if errors.Is(err, errRideExists) {
+			writeError(w, http.StatusConflict, err)
+			return
 		}
-	}
-
-	// 直上で確定させた coupon が手元にあるため再取得せず割引額を直接使う。
-	// 未取得の場合 coupon.Discount はゼロ値(0)で、再取得ミス時と等価。
-	fare := calculateFareWithDiscount(req.PickupCoordinate.Latitude, req.PickupCoordinate.Longitude, req.DestinationCoordinate.Latitude, req.DestinationCoordinate.Longitude, coupon.Discount)
-
-	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		if !isRetryableDBError(err) || attempt == 4 {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		retryBackoff(attempt + 1)
 	}
 
 	// MATCHING 作成をユーザー向けSSEに通知する（接続済みフロント用）
@@ -425,6 +380,115 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		RideID: rideID,
 		Fare:   fare,
 	})
+}
+
+var errRideExists = errors.New("ride already exists")
+
+// insertRideTx は配車INSERT〜coupon確定〜COMMITまでを行う。
+// deadlock等の再試行は呼出側(appPostRides)が行う。
+func insertRideTx(ctx context.Context, user *User, req *appPostRidesRequest) (rideID, matchingStatusID string, fare int, err error) {
+	rideID = ulid.Make().String()
+
+	tx, err := db.Beginx()
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer tx.Rollback()
+
+	continuingRideCount, err := rideRepository.CountContinuingByUserID(ctx, tx, user.ID)
+	if err != nil {
+		return "", "", 0, err
+	}
+
+	if continuingRideCount > 0 {
+		return "", "", 0, errRideExists
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO rides (id, user_id, pickup_latitude, pickup_longitude, destination_latitude, destination_longitude)
+				  VALUES (?, ?, ?, ?, ?, ?)`,
+		rideID, user.ID, req.PickupCoordinate.Latitude, req.PickupCoordinate.Longitude, req.DestinationCoordinate.Latitude, req.DestinationCoordinate.Longitude,
+	); err != nil {
+		return "", "", 0, err
+	}
+
+	matchingStatusID = ulid.Make().String()
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
+		matchingStatusID, rideID, "MATCHING",
+	); err != nil {
+		return "", "", 0, err
+	}
+
+	// マッチング待ちキューに登録する（同一トランザクション）
+	if err := matchingQueueRepository.Enqueue(ctx, tx, rideID); err != nil {
+		return "", "", 0, err
+	}
+
+	var rideCount int
+	if err := tx.GetContext(ctx, &rideCount, `SELECT COUNT(*) FROM rides WHERE user_id = ? `, user.ID); err != nil {
+		return "", "", 0, err
+	}
+
+	var coupon Coupon
+	if rideCount == 1 {
+		// 初回利用で、初回利用クーポンがあれば必ず使う
+		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND code = 'CP_NEW2024' AND used_by IS NULL FOR UPDATE", user.ID); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return "", "", 0, err
+			}
+
+			// 無ければ他のクーポンを付与された順番に使う
+			if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE", user.ID); err != nil {
+				if !errors.Is(err, sql.ErrNoRows) {
+					return "", "", 0, err
+				}
+			} else {
+				if _, err := tx.ExecContext(
+					ctx,
+					"UPDATE coupons SET used_by = ? WHERE user_id = ? AND code = ?",
+					rideID, user.ID, coupon.Code,
+				); err != nil {
+					return "", "", 0, err
+				}
+			}
+		} else {
+			if _, err := tx.ExecContext(
+				ctx,
+				"UPDATE coupons SET used_by = ? WHERE user_id = ? AND code = 'CP_NEW2024'",
+				rideID, user.ID,
+			); err != nil {
+				return "", "", 0, err
+			}
+		}
+	} else {
+		// 他のクーポンを付与された順番に使う
+		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE", user.ID); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return "", "", 0, err
+			}
+		} else {
+			if _, err := tx.ExecContext(
+				ctx,
+				"UPDATE coupons SET used_by = ? WHERE user_id = ? AND code = ?",
+				rideID, user.ID, coupon.Code,
+			); err != nil {
+				return "", "", 0, err
+			}
+		}
+	}
+
+	// 直上で確定させた coupon が手元にあるため再取得せず割引額を直接使う。
+	// 未取得の場合 coupon.Discount はゼロ値(0)で、再取得ミス時と等価。
+	fare = calculateFareWithDiscount(req.PickupCoordinate.Latitude, req.PickupCoordinate.Longitude, req.DestinationCoordinate.Latitude, req.DestinationCoordinate.Longitude, coupon.Discount)
+
+	if err := tx.Commit(); err != nil {
+		return "", "", 0, err
+	}
+
+	return rideID, matchingStatusID, fare, nil
 }
 
 type appPostRidesEstimatedFareRequest struct {
