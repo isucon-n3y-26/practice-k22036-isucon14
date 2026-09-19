@@ -31,6 +31,25 @@ func (r *OwnerRepository) GetByAccessToken(ctx context.Context, accessToken stri
 	return owner, nil
 }
 
+// Create はオーナーを1行挿入する。ID・トークン類は呼出し側で採番する。
+func (r *OwnerRepository) Create(ctx context.Context, q Queryer, owner *models.Owner) error {
+	_, err := q.ExecContext(
+		ctx,
+		"INSERT INTO owners (id, name, access_token, chair_register_token) VALUES (?, ?, ?, ?)",
+		owner.ID, owner.Name, owner.AccessToken, owner.ChairRegisterToken,
+	)
+	return err
+}
+
+// GetByChairRegisterToken は椅子登録トークンでオーナーを返す。椅子登録時の所有者解決用。
+func (r *OwnerRepository) GetByChairRegisterToken(ctx context.Context, chairRegisterToken string) (*models.Owner, error) {
+	owner := &models.Owner{}
+	if err := r.db.GetContext(ctx, owner, "SELECT * FROM owners WHERE chair_register_token = ?", chairRegisterToken); err != nil {
+		return nil, err
+	}
+	return owner, nil
+}
+
 // ClearCache は認証キャッシュを破棄する。初期化でDBが全消去されるため。
 func (r *OwnerRepository) ClearCache() {
 	r.cache = sync.Map{}

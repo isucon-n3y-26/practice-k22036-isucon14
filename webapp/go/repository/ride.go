@@ -151,6 +151,26 @@ func (r *RideRepository) UpdateEvaluation(ctx context.Context, q Queryer, rideID
 	return result.RowsAffected()
 }
 
+// Create は配車要求ライドを1行挿入する。IDはULIDを想定し呼出し側で採番する。
+func (r *RideRepository) Create(ctx context.Context, q Queryer, rideID, userID string, pickupLatitude, pickupLongitude, destLatitude, destLongitude int) error {
+	_, err := q.ExecContext(
+		ctx,
+		`INSERT INTO rides (id, user_id, pickup_latitude, pickup_longitude, destination_latitude, destination_longitude)
+				  VALUES (?, ?, ?, ?, ?, ?)`,
+		rideID, userID, pickupLatitude, pickupLongitude, destLatitude, destLongitude,
+	)
+	return err
+}
+
+// CountByUserID はユーザーのライド通算件数を返す。初回利用クーポン判定用。
+func (r *RideRepository) CountByUserID(ctx context.Context, q Getter, userID string) (int, error) {
+	var count int
+	if err := q.GetContext(ctx, &count, `SELECT COUNT(*) FROM rides WHERE user_id = ? `, userID); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // ListByUserID はユーザーのライドを作成昇順で返す。
 // 決済リトライ時の件数照合用で、評価の書込み前後で内容は不変のためTX外で読める。
 func (r *RideRepository) ListByUserID(ctx context.Context, q Selecter, userID string) ([]models.Ride, error) {

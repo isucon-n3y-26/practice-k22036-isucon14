@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -69,6 +71,7 @@ var matchingQueueRepository *repository.MatchingQueueRepository
 var couponRepository *repository.CouponRepository
 var ownerRepository *repository.OwnerRepository
 var paymentTokenRepository *repository.PaymentTokenRepository
+var settingsRepository *repository.SettingsRepository
 var globalStatusCache *cache.StatusCache
 var globalRideCoordsCache *cache.RideCoordsCache
 var globalLocationBuffer *LocationBuffer
@@ -82,8 +85,21 @@ var paymentGatewayBaseURL string
 func main() {
 	configureLogging()
 	mux := setup()
-	slog.Info("Listening on :8080")
-	http.ListenAndServe(":8080", mux)
+	srv := &http.Server{Addr: ":8080", Handler: mux}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT)
+	defer stop()
+	go func() {
+		slog.Info("Listening on :8080")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", "error", err)
+		}
+	}()
+	<-ctx.Done()
+	// 再起動・停止時の滞留消失を防ぐため、バッファを吐き出してから終了する
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutdownCtx)
+	globalLocationBuffer.Flush(shutdownCtx)
 }
 
 func configureLogging() {
@@ -188,12 +204,15 @@ func setup() http.Handler {
 	couponRepository = repository.NewCouponRepository(db)
 	ownerRepository = repository.NewOwnerRepository(db)
 	paymentTokenRepository = repository.NewPaymentTokenRepository(db)
+	settingsRepository = repository.NewSettingsRepository(db)
 	globalLocationBuffer = NewLocationBuffer(db)
 	go globalLocationBuffer.Start(context.Background())
 	globalStatusLog = NewStatusLog()
 	// 決済URLは起動時に読み込み、初期化APIで更新する。以後不変のためキャッシュする。
-	if err := db.GetContext(context.Background(), &paymentGatewayBaseURL, "SELECT value FROM settings WHERE name = 'payment_gateway_url'"); err != nil {
+	if url, err := settingsRepository.GetPaymentGatewayURL(context.Background(), db); err != nil {
 		slog.Warn("failed to load payment_gateway_url, will be set on initialize", "error", err)
+	} else {
+		paymentGatewayBaseURL = url
 	}
 	globalStatusCache = cache.NewStatusCache(func(ctx context.Context, q cache.Getter, rideID string) (string, error) {
 		return rideStatusRepository.GetLatestStatusByRideID(ctx, q, rideID)
@@ -218,6 +237,15 @@ func setup() http.Handler {
 	}
 	if err := reloadStatusLog(context.Background()); err != nil {
 		panic(err)
+	}
+
+	// matcherは起動時にも必ず起動する。initialize時のみだと、
+	// bench中の再起動でマッチングが停止したままになる。
+	// 二重起動防止は matcherStarted で行う。
+	if !matcherStarted {
+		matcherStarted = true
+		slog.Info("starting matcher after setup")
+		go startMatcher(context.Background())
 	}
 
 	mux := chi.NewRouter()
@@ -299,7 +327,7 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := db.ExecContext(ctx, "UPDATE settings SET value = ? WHERE name = 'payment_gateway_url'", req.PaymentServer); err != nil {
+	if err := settingsRepository.UpdatePaymentGatewayURL(ctx, db, req.PaymentServer); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

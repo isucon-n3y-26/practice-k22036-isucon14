@@ -53,6 +53,42 @@ func (r *CouponRepository) GetOldestUnused(ctx context.Context, q Getter, userID
 	return coupon, nil
 }
 
+// GetNewUserCouponForUpdate は未使用の初回利用クーポンをロック付きで返す。
+// 配車時の確定用。無い時は sql.ErrNoRows。
+func (r *CouponRepository) GetNewUserCouponForUpdate(ctx context.Context, q Getter, userID string) (*models.Coupon, error) {
+	coupon := &models.Coupon{}
+	if err := q.GetContext(ctx, coupon,
+		"SELECT * FROM coupons WHERE user_id = ? AND code = 'CP_NEW2024' AND used_by IS NULL FOR UPDATE",
+		userID,
+	); err != nil {
+		return nil, err
+	}
+	return coupon, nil
+}
+
+// GetOldestUnusedForUpdate は未使用クーポンを付与順でロック付きで1件返す。
+// 配車時の確定用。無い時は sql.ErrNoRows。
+func (r *CouponRepository) GetOldestUnusedForUpdate(ctx context.Context, q Getter, userID string) (*models.Coupon, error) {
+	coupon := &models.Coupon{}
+	if err := q.GetContext(ctx, coupon,
+		"SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE",
+		userID,
+	); err != nil {
+		return nil, err
+	}
+	return coupon, nil
+}
+
+// ClaimByCode は指定クーポンをライドに紐付けて確定する。
+func (r *CouponRepository) ClaimByCode(ctx context.Context, q Queryer, rideID, userID, code string) error {
+	_, err := q.ExecContext(
+		ctx,
+		"UPDATE coupons SET used_by = ? WHERE user_id = ? AND code = ?",
+		rideID, userID, code,
+	)
+	return err
+}
+
 // ListByUsedByIDs は指定ライドに紐づくクーポンを一括取得する。履歴表示の N+1 解消用。
 func (r *CouponRepository) ListByUsedByIDs(ctx context.Context, q Selecter, rideIDs []string) ([]models.Coupon, error) {
 	coupons := []models.Coupon{}

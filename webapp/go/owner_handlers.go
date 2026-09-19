@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"errors"
 	"net/http"
 	"strconv"
@@ -40,12 +39,12 @@ func ownerPostOwners(w http.ResponseWriter, r *http.Request) {
 	accessToken := secureRandomStr(32)
 	chairRegisterToken := secureRandomStr(32)
 
-	_, err := db.ExecContext(
-		ctx,
-		"INSERT INTO owners (id, name, access_token, chair_register_token) VALUES (?, ?, ?, ?)",
-		ownerID, req.Name, accessToken, chairRegisterToken,
-	)
-	if err != nil {
+	if err := ownerRepository.Create(ctx, db, &Owner{
+		ID:                 ownerID,
+		Name:               req.Name,
+		AccessToken:        accessToken,
+		ChairRegisterToken: chairRegisterToken,
+	}); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -109,8 +108,8 @@ func ownerGetSales(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	chairs := []Chair{}
-	if err := tx.SelectContext(ctx, &chairs, "SELECT * FROM chairs WHERE owner_id = ?", owner.ID); err != nil {
+	chairs, err := chairRepository.ListByOwnerID(ctx, tx, owner.ID)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -166,19 +165,6 @@ func calculateSale(ride Ride) int {
 	return calculateFare(ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
 }
 
-type chairWithDetail struct {
-	ID                     string       `db:"id"`
-	OwnerID                string       `db:"owner_id"`
-	Name                   string       `db:"name"`
-	AccessToken            string       `db:"access_token"`
-	Model                  string       `db:"model"`
-	IsActive               bool         `db:"is_active"`
-	CreatedAt              time.Time    `db:"created_at"`
-	UpdatedAt              time.Time    `db:"updated_at"`
-	TotalDistance          int          `db:"total_distance"`
-	TotalDistanceUpdatedAt sql.NullTime `db:"total_distance_updated_at"`
-}
-
 type ownerGetChairResponse struct {
 	Chairs []ownerGetChairResponseChair `json:"chairs"`
 }
@@ -198,21 +184,8 @@ func ownerGetChairs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	owner := ctx.Value("owner").(*Owner)
 
-	chairs := []chairWithDetail{}
-	if err := db.SelectContext(ctx, &chairs, `SELECT chairs.id,
-       chairs.owner_id,
-       chairs.name,
-       chairs.access_token,
-       chairs.model,
-       chairs.is_active,
-       chairs.created_at,
-       chairs.updated_at,
-       IFNULL(distance.total_distance, 0) AS total_distance,
-       distance.updated_at AS total_distance_updated_at
-FROM chairs
-       LEFT JOIN chair_total_distances distance ON distance.chair_id = chairs.id
-WHERE chairs.owner_id = ?
-`, owner.ID); err != nil {
+	chairs, err := chairRepository.ListWithDistanceByOwnerID(ctx, db, owner.ID)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

@@ -16,6 +16,17 @@ func NewPaymentTokenRepository(db *sqlx.DB) *PaymentTokenRepository {
 	return &PaymentTokenRepository{db: db}
 }
 
+// Create は決済トークンを登録する。ユーザー毎に1行の想定。
+func (r *PaymentTokenRepository) Create(ctx context.Context, q Queryer, userID, token string) error {
+	_, err := q.ExecContext(
+		ctx,
+		`INSERT INTO payment_tokens (user_id, token) VALUES (?, ?)`,
+		userID,
+		token,
+	)
+	return err
+}
+
 // GetByUserID はユーザーの決済トークンを返す。未登録時は sql.ErrNoRows。
 func (r *PaymentTokenRepository) GetByUserID(ctx context.Context, q Getter, userID string) (*models.PaymentToken, error) {
 	token := &models.PaymentToken{}

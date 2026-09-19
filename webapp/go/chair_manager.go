@@ -2,12 +2,19 @@ package main
 
 import (
 	"context"
+	"hash/fnv"
 	"math"
 	"sync"
+	"sync/atomic"
 
 	"github.com/jmoiron/sqlx"
 )
 
+// ChairState は椅子1台の状態。不変値として atomic.Pointer で保持し、
+// 読取はロックフリー、書込みは stripe ロック下で copy-on-write する。
+// 従来の単一RWMutexでは付近検索・マッチ走査（約100台×100μs）が
+// 座標POSTの更新と直列化し、POST遅延→bench側の送信間引き→
+// total_distance欠落を招くため、この構造に変えた。意味は等価。
 type ChairState struct {
 	ID            string
 	Name          string
@@ -21,24 +28,58 @@ type ChairState struct {
 }
 
 type ChairManager struct {
-	mu          sync.RWMutex
-	chairs      map[string]*ChairState
+	chairs      sync.Map // chairID -> *atomic.Pointer[ChairState]
+	modelMu     sync.Mutex
 	modelSpeeds map[string]int
+	stripes     [256]sync.Mutex
 }
 
 var globalChairManager = &ChairManager{
-	chairs:      make(map[string]*ChairState),
 	modelSpeeds: make(map[string]int),
 }
 
+func (cm *ChairManager) stripe(id string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(id))
+	return &cm.stripes[h.Sum32()%uint32(len(cm.stripes))]
+}
+
+func (cm *ChairManager) speedOf(model string) int {
+	cm.modelMu.Lock()
+	defer cm.modelMu.Unlock()
+	if s := cm.modelSpeeds[model]; s != 0 {
+		return s
+	}
+	return 2
+}
+
+func (cm *ChairManager) loadPtr(id string) *atomic.Pointer[ChairState] {
+	if v, ok := cm.chairs.Load(id); ok {
+		return v.(*atomic.Pointer[ChairState])
+	}
+	return nil
+}
+
+// update は stripe 直列化下で状態を copy-on-write 更新する。
+// 存在しない椅子への更新は無視する（従来の ok ガードと等価）。
+func (cm *ChairManager) update(id string, fn func(*ChairState)) {
+	p := cm.loadPtr(id)
+	if p == nil {
+		return
+	}
+	s := cm.stripe(id)
+	s.Lock()
+	defer s.Unlock()
+	cur := p.Load()
+	if cur == nil {
+		return
+	}
+	next := *cur
+	fn(&next)
+	p.Store(&next)
+}
+
 func (cm *ChairManager) Reload(ctx context.Context, db *sqlx.DB) error {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
-	cm.chairs = make(map[string]*ChairState)
-	cm.modelSpeeds = make(map[string]int)
-
-	// 1. モデル速度のロード
 	type modelRow struct {
 		Name  string `db:"name"`
 		Speed int    `db:"speed"`
@@ -47,11 +88,11 @@ func (cm *ChairManager) Reload(ctx context.Context, db *sqlx.DB) error {
 	if err := db.SelectContext(ctx, &models, "SELECT name, speed FROM chair_models"); err != nil {
 		return err
 	}
+	freshSpeeds := make(map[string]int, len(models))
 	for _, m := range models {
-		cm.modelSpeeds[m.Name] = m.Speed
+		freshSpeeds[m.Name] = m.Speed
 	}
 
-	// 2. 椅子情報のロード
 	type chairRow struct {
 		ID       string `db:"id"`
 		Name     string `db:"name"`
@@ -62,21 +103,7 @@ func (cm *ChairManager) Reload(ctx context.Context, db *sqlx.DB) error {
 	if err := db.SelectContext(ctx, &chairs, "SELECT id, name, model, is_active FROM chairs"); err != nil {
 		return err
 	}
-	for _, c := range chairs {
-		speed := cm.modelSpeeds[c.Model]
-		if speed == 0 {
-			speed = 2
-		}
-		cm.chairs[c.ID] = &ChairState{
-			ID:       c.ID,
-			Name:     c.Name,
-			Model:    c.Model,
-			Speed:    speed,
-			IsActive: c.IsActive,
-		}
-	}
 
-	// 3. 最新位置情報のロード
 	type locRow struct {
 		ChairID   string `db:"chair_id"`
 		Latitude  int    `db:"latitude"`
@@ -94,15 +121,7 @@ func (cm *ChairManager) Reload(ctx context.Context, db *sqlx.DB) error {
 	`); err != nil {
 		return err
 	}
-	for _, l := range locs {
-		if state, ok := cm.chairs[l.ChairID]; ok {
-			state.Latitude = l.Latitude
-			state.Longitude = l.Longitude
-			state.HasLocation = true
-		}
-	}
 
-	// 4. 未完了ライドのロード
 	type incompleteRideRow struct {
 		ChairID string `db:"chair_id"`
 		RideID  string `db:"id"`
@@ -119,64 +138,99 @@ func (cm *ChairManager) Reload(ctx context.Context, db *sqlx.DB) error {
 	`); err != nil {
 		return err
 	}
-	for _, r := range incompleteRides {
-		if state, ok := cm.chairs[r.ChairID]; ok {
-			state.CurrentRideID = r.RideID
+
+	// 起動時・初期化時の再構築。初期化中はbenchトラフィックなしのため、
+	// 削除→再登録の transient は観測されない。
+	cm.modelMu.Lock()
+	cm.modelSpeeds = freshSpeeds
+	cm.modelMu.Unlock()
+
+	keep := make(map[string]struct{}, len(chairs))
+	for _, c := range chairs {
+		speed := freshSpeeds[c.Model]
+		if speed == 0 {
+			speed = 2
+		}
+		st := &ChairState{
+			ID:       c.ID,
+			Name:     c.Name,
+			Model:    c.Model,
+			Speed:    speed,
+			IsActive: c.IsActive,
+		}
+		keep[c.ID] = struct{}{}
+		if p := cm.loadPtr(c.ID); p != nil {
+			p.Store(st)
+		} else {
+			p := &atomic.Pointer[ChairState]{}
+			p.Store(st)
+			cm.chairs.Store(c.ID, p)
 		}
 	}
+	cm.chairs.Range(func(key, _ any) bool {
+		if _, ok := keep[key.(string)]; !ok {
+			cm.chairs.Delete(key)
+		}
+		return true
+	})
 
+	for _, l := range locs {
+		l := l
+		cm.update(l.ChairID, func(st *ChairState) {
+			st.Latitude = l.Latitude
+			st.Longitude = l.Longitude
+			st.HasLocation = true
+		})
+	}
+	for _, r := range incompleteRides {
+		r := r
+		cm.update(r.ChairID, func(st *ChairState) {
+			st.CurrentRideID = r.RideID
+		})
+	}
 	return nil
 }
 
 func (cm *ChairManager) RegisterChair(id, name, model string) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
-	speed := cm.modelSpeeds[model]
-	if speed == 0 {
-		speed = 2
-	}
-	cm.chairs[id] = &ChairState{
+	p := &atomic.Pointer[ChairState]{}
+	p.Store(&ChairState{
 		ID:       id,
 		Name:     name,
 		Model:    model,
-		Speed:    speed,
+		Speed:    cm.speedOf(model),
 		IsActive: false,
-	}
+	})
+	// 同ID再登録時は既存のライブ状態を優先する
+	_, _ = cm.chairs.LoadOrStore(id, p)
 }
 
 func (cm *ChairManager) SetActivity(chairID string, isActive bool) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
-	if state, ok := cm.chairs[chairID]; ok {
-		state.IsActive = isActive
-	}
+	cm.update(chairID, func(st *ChairState) {
+		st.IsActive = isActive
+	})
 }
 
 func (cm *ChairManager) UpdateLocation(chairID string, lat, lon int) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
-	if state, ok := cm.chairs[chairID]; ok {
-		state.Latitude = lat
-		state.Longitude = lon
-		state.HasLocation = true
-	}
+	cm.update(chairID, func(st *ChairState) {
+		st.Latitude = lat
+		st.Longitude = lon
+		st.HasLocation = true
+	})
 }
 
 // GetCurrentRideID は椅子に割り当て中のライドIDを返す。
 // 未割当時は ok=false。FindBestAvailableChair/Reload で設定され、
 // CompleteRide/UnassignRide でクリアされる。
 func (cm *ChairManager) GetCurrentRideID(chairID string) (rideID string, ok bool) {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-
-	state, ok := cm.chairs[chairID]
-	if !ok || state.CurrentRideID == "" {
+	p := cm.loadPtr(chairID)
+	if p == nil {
 		return "", false
 	}
-	return state.CurrentRideID, true
+	st := p.Load()
+	if st == nil || st.CurrentRideID == "" {
+		return "", false
+	}
+	return st.CurrentRideID, true
 }
 
 // GetLocation は椅子の最新既知座標を返す。chairPostCoordinate の
@@ -186,99 +240,104 @@ func (cm *ChairManager) GetCurrentRideID(chairID string) (rideID string, ok bool
 // 更新されるため、常に直前SELECTと同じ値を返す。
 // 未登録・未測位の椅子に対しては ok=false を返す。
 func (cm *ChairManager) GetLocation(chairID string) (lat, lon int, ok bool) {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-
-	state, ok := cm.chairs[chairID]
-	if !ok || !state.HasLocation {
+	p := cm.loadPtr(chairID)
+	if p == nil {
 		return 0, 0, false
 	}
-	return state.Latitude, state.Longitude, true
+	st := p.Load()
+	if st == nil || !st.HasLocation {
+		return 0, 0, false
+	}
+	return st.Latitude, st.Longitude, true
 }
 
 func (cm *ChairManager) AssignRide(chairID, rideID string) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
-	if state, ok := cm.chairs[chairID]; ok {
-		state.CurrentRideID = rideID
-	}
+	cm.update(chairID, func(st *ChairState) {
+		st.CurrentRideID = rideID
+	})
 }
 
 func (cm *ChairManager) CompleteRide(chairID string) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
-	if state, ok := cm.chairs[chairID]; ok {
-		state.CurrentRideID = ""
-	}
+	cm.update(chairID, func(st *ChairState) {
+		st.CurrentRideID = ""
+	})
 }
 
 func (cm *ChairManager) UnassignRide(chairID string) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
-	if state, ok := cm.chairs[chairID]; ok {
-		state.CurrentRideID = ""
-	}
+	cm.update(chairID, func(st *ChairState) {
+		st.CurrentRideID = ""
+	})
 }
 
 // FindBestAvailableChair は利用可能な椅子の中で到着時間が最も短い椅子を選択し、即座に rideID を割り当てます
 func (cm *ChairManager) FindBestAvailableChair(pickupLat, pickupLon int, rideID string) (*ChairState, bool) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
+	// 走査はロックフリーのスナップショットで行い、確定だけ stripe 下で
+	// 再検証＋割当てするため、同時実行に対して安全。最大3走査。
+	for attempt := 0; attempt < 3; attempt++ {
+		var bestID string
+		bestTime := math.MaxFloat64
+		bestDistance := math.MaxInt
+		hasBest := false
 
-	var bestChair *ChairState
-	bestTime := math.MaxFloat64
-	bestDistance := math.MaxInt
+		cm.chairs.Range(func(key, value any) bool {
+			st := value.(*atomic.Pointer[ChairState]).Load()
+			if st == nil || !st.IsActive || !st.HasLocation || st.CurrentRideID != "" {
+				return true
+			}
+			dist := calculateDistance(pickupLat, pickupLon, st.Latitude, st.Longitude)
+			estimatedTime := float64(dist) / float64(st.Speed)
+			if estimatedTime < bestTime || (estimatedTime == bestTime && dist < bestDistance) {
+				bestTime = estimatedTime
+				bestDistance = dist
+				bestID = key.(string)
+				hasBest = true
+			}
+			return true
+		})
+		if !hasBest {
+			return nil, false
+		}
 
-	for _, state := range cm.chairs {
-		if !state.IsActive || !state.HasLocation || state.CurrentRideID != "" {
+		p := cm.loadPtr(bestID)
+		if p == nil {
 			continue
 		}
-
-		dist := calculateDistance(pickupLat, pickupLon, state.Latitude, state.Longitude)
-		// 到着予測時間 = 距離 / 速度
-		estimatedTime := float64(dist) / float64(state.Speed)
-
-		if estimatedTime < bestTime || (estimatedTime == bestTime && dist < bestDistance) {
-			bestTime = estimatedTime
-			bestDistance = dist
-			bestChair = state
+		s := cm.stripe(bestID)
+		s.Lock()
+		cur := p.Load()
+		if cur != nil && cur.IsActive && cur.HasLocation && cur.CurrentRideID == "" {
+			next := *cur
+			next.CurrentRideID = rideID
+			p.Store(&next)
+			claimed := next
+			s.Unlock()
+			return &claimed, true
 		}
+		s.Unlock()
+		// 確定時に塞がっていた。再走査する
 	}
-
-	if bestChair == nil {
-		return nil, false
-	}
-
-	bestChair.CurrentRideID = rideID
-	// コピーを返す
-	copyState := *bestChair
-	return &copyState, true
+	return nil, false
 }
 
 func (cm *ChairManager) GetNearbyChairs(lat, lon, distance int) []appGetNearbyChairsResponseChair {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-
 	nearby := make([]appGetNearbyChairsResponseChair, 0)
-	for _, state := range cm.chairs {
-		if !state.IsActive || !state.HasLocation || state.CurrentRideID != "" {
-			continue
+	cm.chairs.Range(func(_, value any) bool {
+		st := value.(*atomic.Pointer[ChairState]).Load()
+		if st == nil || !st.IsActive || !st.HasLocation || st.CurrentRideID != "" {
+			return true
 		}
-
-		if calculateDistance(lat, lon, state.Latitude, state.Longitude) <= distance {
+		if calculateDistance(lat, lon, st.Latitude, st.Longitude) <= distance {
 			nearby = append(nearby, appGetNearbyChairsResponseChair{
-				ID:    state.ID,
-				Name:  state.Name,
-				Model: state.Model,
+				ID:    st.ID,
+				Name:  st.Name,
+				Model: st.Model,
 				CurrentCoordinate: Coordinate{
-					Latitude:  state.Latitude,
-					Longitude: state.Longitude,
+					Latitude:  st.Latitude,
+					Longitude: st.Longitude,
 				},
 			})
 		}
-	}
+		return true
+	})
 	return nearby
 }

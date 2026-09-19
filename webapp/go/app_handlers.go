@@ -191,13 +191,7 @@ func appPostPaymentMethods(w http.ResponseWriter, r *http.Request) {
 
 	user := ctx.Value("user").(*User)
 
-	_, err := db.ExecContext(
-		ctx,
-		`INSERT INTO payment_tokens (user_id, token) VALUES (?, ?)`,
-		user.ID,
-		req.Token,
-	)
-	if err != nil {
+	if err := paymentTokenRepository.Create(ctx, db, user.ID, req.Token); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -404,21 +398,12 @@ func insertRideTx(ctx context.Context, user *User, req *appPostRidesRequest) (ri
 		return "", "", 0, errRideExists
 	}
 
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO rides (id, user_id, pickup_latitude, pickup_longitude, destination_latitude, destination_longitude)
-				  VALUES (?, ?, ?, ?, ?, ?)`,
-		rideID, user.ID, req.PickupCoordinate.Latitude, req.PickupCoordinate.Longitude, req.DestinationCoordinate.Latitude, req.DestinationCoordinate.Longitude,
-	); err != nil {
+	if err := rideRepository.Create(ctx, tx, rideID, user.ID, req.PickupCoordinate.Latitude, req.PickupCoordinate.Longitude, req.DestinationCoordinate.Latitude, req.DestinationCoordinate.Longitude); err != nil {
 		return "", "", 0, err
 	}
 
 	matchingStatusID = ulid.Make().String()
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
-		matchingStatusID, rideID, "MATCHING",
-	); err != nil {
+	if err := rideStatusRepository.Create(ctx, tx, matchingStatusID, rideID, "MATCHING"); err != nil {
 		return "", "", 0, err
 	}
 
@@ -427,54 +412,48 @@ func insertRideTx(ctx context.Context, user *User, req *appPostRidesRequest) (ri
 		return "", "", 0, err
 	}
 
-	var rideCount int
-	if err := tx.GetContext(ctx, &rideCount, `SELECT COUNT(*) FROM rides WHERE user_id = ? `, user.ID); err != nil {
+	rideCount, err := rideRepository.CountByUserID(ctx, tx, user.ID)
+	if err != nil {
 		return "", "", 0, err
 	}
 
 	var coupon Coupon
 	if rideCount == 1 {
 		// 初回利用で、初回利用クーポンがあれば必ず使う
-		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND code = 'CP_NEW2024' AND used_by IS NULL FOR UPDATE", user.ID); err != nil {
+		newUserCoupon, err := couponRepository.GetNewUserCouponForUpdate(ctx, tx, user.ID)
+		if err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return "", "", 0, err
 			}
 
 			// 無ければ他のクーポンを付与された順番に使う
-			if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE", user.ID); err != nil {
+			oldest, err := couponRepository.GetOldestUnusedForUpdate(ctx, tx, user.ID)
+			if err != nil {
 				if !errors.Is(err, sql.ErrNoRows) {
 					return "", "", 0, err
 				}
 			} else {
-				if _, err := tx.ExecContext(
-					ctx,
-					"UPDATE coupons SET used_by = ? WHERE user_id = ? AND code = ?",
-					rideID, user.ID, coupon.Code,
-				); err != nil {
+				coupon = *oldest
+				if err := couponRepository.ClaimByCode(ctx, tx, rideID, user.ID, coupon.Code); err != nil {
 					return "", "", 0, err
 				}
 			}
 		} else {
-			if _, err := tx.ExecContext(
-				ctx,
-				"UPDATE coupons SET used_by = ? WHERE user_id = ? AND code = 'CP_NEW2024'",
-				rideID, user.ID,
-			); err != nil {
+			coupon = *newUserCoupon
+			if err := couponRepository.ClaimByCode(ctx, tx, rideID, user.ID, coupon.Code); err != nil {
 				return "", "", 0, err
 			}
 		}
 	} else {
 		// 他のクーポンを付与された順番に使う
-		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE", user.ID); err != nil {
+		oldest, err := couponRepository.GetOldestUnusedForUpdate(ctx, tx, user.ID)
+		if err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return "", "", 0, err
 			}
 		} else {
-			if _, err := tx.ExecContext(
-				ctx,
-				"UPDATE coupons SET used_by = ? WHERE user_id = ? AND code = ?",
-				rideID, user.ID, coupon.Code,
-			); err != nil {
+			coupon = *oldest
+			if err := couponRepository.ClaimByCode(ctx, tx, rideID, user.ID, coupon.Code); err != nil {
 				return "", "", 0, err
 			}
 		}

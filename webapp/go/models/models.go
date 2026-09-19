@@ -33,6 +33,13 @@ type ChairStats struct {
 	TotalEvaluationAvg float64 `db:"total_evaluation_avg"`
 }
 
+// ChairWithDistance はオーナー向け椅子一覧の1行。椅子情報＋累積走行距離。
+type ChairWithDistance struct {
+	Chair
+	TotalDistance          int          `db:"total_distance"`
+	TotalDistanceUpdatedAt sql.NullTime `db:"total_distance_updated_at"`
+}
+
 type ChairLocation struct {
 	ID        string    `db:"id"`
 	ChairID   string    `db:"chair_id"`

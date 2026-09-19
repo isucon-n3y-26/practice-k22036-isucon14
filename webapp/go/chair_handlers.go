@@ -36,8 +36,8 @@ func chairPostChairs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owner := &Owner{}
-	if err := db.GetContext(ctx, owner, "SELECT * FROM owners WHERE chair_register_token = ?", req.ChairRegisterToken); err != nil {
+	owner, err := ownerRepository.GetByChairRegisterToken(ctx, req.ChairRegisterToken)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusUnauthorized, errors.New("invalid chair_register_token"))
 			return
@@ -49,11 +49,14 @@ func chairPostChairs(w http.ResponseWriter, r *http.Request) {
 	chairID := ulid.Make().String()
 	accessToken := secureRandomStr(32)
 
-	if _, err := db.ExecContext(
-		ctx,
-		"INSERT INTO chairs (id, owner_id, name, model, is_active, access_token) VALUES (?, ?, ?, ?, ?, ?)",
-		chairID, owner.ID, req.Name, req.Model, false, accessToken,
-	); err != nil {
+	if err := chairRepository.Create(ctx, db, &Chair{
+		ID:          chairID,
+		OwnerID:     owner.ID,
+		Name:        req.Name,
+		Model:       req.Model,
+		IsActive:    false,
+		AccessToken: accessToken,
+	}); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -86,8 +89,7 @@ func chairPostActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := db.ExecContext(ctx, "UPDATE chairs SET is_active = ? WHERE id = ?", req.IsActive, chair.ID)
-	if err != nil {
+	if err := chairRepository.UpdateIsActive(ctx, db, chair.ID, req.IsActive); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -139,15 +141,13 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: recordedAt,
 	})
 
-	// 走行距離を累積
+	// 直前位置は ChairManager が保持するため SELECT 不要。
+	// 走行距離はTX内で同期upsertする。非同期化すると読取時flushの
+	// swap〜書込完了窓で recorded_at<=updated_at かつ未計上の区間が生まれ、
+	// benchの total_distance 検証（want/until照合）に触れるため、
+	// referenceと同一の原子性を保つ。
 	if hasPrev {
-		if _, err := tx.ExecContext(
-			ctx,
-			`INSERT INTO chair_total_distances (chair_id, total_distance) VALUES (?, ?)
-			 ON DUPLICATE KEY UPDATE total_distance = total_distance + VALUES(total_distance)`,
-			chair.ID,
-			calculateDistance(prevLat, prevLon, req.Latitude, req.Longitude),
-		); err != nil {
+		if err := chairRepository.AddTotalDistance(ctx, tx, chair.ID, calculateDistance(prevLat, prevLon, req.Latitude, req.Longitude)); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -174,7 +174,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		if status != "COMPLETED" && status != "CANCELED" {
 			if req.Latitude == coords.PickupLatitude && req.Longitude == coords.PickupLongitude && status == "ENROUTE" {
 				insertedStatusID = ulid.Make().String()
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", insertedStatusID, rideID, "PICKUP"); err != nil {
+				if err := rideStatusRepository.Create(ctx, tx, insertedStatusID, rideID, "PICKUP"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -184,7 +184,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 
 			if req.Latitude == coords.DestinationLatitude && req.Longitude == coords.DestinationLongitude && status == "CARRYING" {
 				insertedStatusID = ulid.Make().String()
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", insertedStatusID, rideID, "ARRIVED"); err != nil {
+				if err := rideStatusRepository.Create(ctx, tx, insertedStatusID, rideID, "ARRIVED"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -349,7 +349,7 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 	// Acknowledge the ride
 	case "ENROUTE":
 		statusID = ulid.Make().String()
-		if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", statusID, ride.ID, "ENROUTE"); err != nil {
+		if err := rideStatusRepository.Create(ctx, tx, statusID, ride.ID, "ENROUTE"); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -365,7 +365,7 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		statusID = ulid.Make().String()
-		if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", statusID, ride.ID, "CARRYING"); err != nil {
+		if err := rideStatusRepository.Create(ctx, tx, statusID, ride.ID, "CARRYING"); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
