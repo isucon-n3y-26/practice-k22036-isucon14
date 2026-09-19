@@ -12,6 +12,18 @@ import (
 
 var erroredUpstream = errors.New("errored upstream")
 
+// 決済GW専用クライアント。DefaultClientはhost毎idle2接続・タイムアウト無しで
+// 高並行時にTCP/TLSハンドシェイク連発＋ハング蓄積になるため、プールと上限を明示する。
+var paymentHTTPClient = &http.Client{
+	Timeout: 3 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: 100,
+		MaxConnsPerHost:     100,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 type paymentGatewayPostPaymentRequest struct {
 	Amount int `json:"amount"`
 }
@@ -39,7 +51,7 @@ func requestPaymentGatewayPostPayment(ctx context.Context, paymentGatewayURL str
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Authorization", "Bearer "+token)
 
-			res, err := http.DefaultClient.Do(req)
+			res, err := paymentHTTPClient.Do(req)
 			if err != nil {
 				return err
 			}
@@ -53,7 +65,7 @@ func requestPaymentGatewayPostPayment(ctx context.Context, paymentGatewayURL str
 				}
 				getReq.Header.Set("Authorization", "Bearer "+token)
 
-			getRes, err := http.DefaultClient.Do(getReq)
+			getRes, err := paymentHTTPClient.Do(getReq)
 			if err != nil {
 				return err
 			}
