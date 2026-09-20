@@ -2,7 +2,10 @@ package repository
 
 import (
 	"context"
+	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
@@ -61,6 +64,70 @@ func (r *ChairRepository) AddTotalDistance(ctx context.Context, q Queryer, chair
 		chairID,
 		delta,
 	)
+	return err
+}
+
+// ChairDistance は椅子ごとの累積走行距離と最終更新時刻。
+type ChairDistance struct {
+	ChairID   string    `db:"chair_id"`
+	Total     int       `db:"total_distance"`
+	UpdatedAt time.Time `db:"updated_at"`
+}
+
+// ListAllDistances は全椅子の累積走行距離を返す。DistanceBufferのReload同期用。
+func (r *ChairRepository) ListAllDistances(ctx context.Context, q Selecter) ([]ChairDistance, error) {
+	dists := []ChairDistance{}
+	if err := q.SelectContext(ctx, &dists, "SELECT chair_id, total_distance, updated_at FROM chair_total_distances"); err != nil {
+		return nil, err
+	}
+	return dists, nil
+}
+
+// GetTotalDistance は椅子1台の累積走行距離を返す。行が無ければ sql.ErrNoRows。
+// ownerGetChairs のメモリ未保持フォールバック用。
+func (r *ChairRepository) GetTotalDistance(ctx context.Context, q Getter, chairID string) (ChairDistance, error) {
+	d := ChairDistance{}
+	if err := q.GetContext(ctx, &d, "SELECT chair_id, total_distance, updated_at FROM chair_total_distances WHERE chair_id = ?", chairID); err != nil {
+		return ChairDistance{}, err
+	}
+	return d, nil
+}
+// AddTotalDistances は複数椅子の走行距離を1本の multi-row upsert で加算する。
+// DistanceBuffer の周期flush用で、autocommitで呼ぶこと。
+// UpdatedAt は合算POSTの recordedAt 最大値（呼出し側で切上げ済み）を明示挿入し、
+// 逐次upsert時の commit 時刻と同等の意味を保つ。
+type DistanceDelta struct {
+	ChairID   string
+	Delta     int
+	UpdatedAt time.Time
+}
+
+func (r *ChairRepository) AddTotalDistances(ctx context.Context, q Queryer, deltas []DistanceDelta) error {
+	if len(deltas) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(deltas))
+	byID := make(map[string]DistanceDelta, len(deltas))
+	for _, d := range deltas {
+		if _, ok := byID[d.ChairID]; !ok {
+			ids = append(ids, d.ChairID)
+		}
+		byID[d.ChairID] = d
+	}
+	sort.Strings(ids)
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO chair_total_distances (chair_id, total_distance, updated_at) VALUES ")
+	args := make([]any, 0, len(ids)*3)
+	for i, id := range ids {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString("(?,?,?)")
+		d := byID[id]
+		args = append(args, d.ChairID, d.Delta, d.UpdatedAt)
+	}
+	sb.WriteString(" ON DUPLICATE KEY UPDATE total_distance = total_distance + VALUES(total_distance), updated_at = VALUES(updated_at)")
+	_, err := q.ExecContext(ctx, sb.String(), args...)
 	return err
 }
 

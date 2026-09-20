@@ -138,16 +138,9 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	lk.Lock()
 	defer lk.Unlock()
 
-	tx, err := db.Beginx()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
-	// 直前の位置情報はインメモリの椅子管理から取得する（走行距離の差分計算用）。
-	// ChairManager.GetLocation は直前位置SELECTと等価のため、SELECT 1本を削減できる。
-	prevLat, prevLon, hasPrev := globalChairManager.GetLocation(chair.ID)
+	// 直前の位置情報の有無は診断用に数える（距離の差分計算は DistanceBuffer が
+	// POST毎の基準点を自前保持するため、ChairManagerの状態に依存しない）。
+	_, _, hasPrev := globalChairManager.GetLocation(chair.ID)
 
 	chairLocationID := ulid.Make().String()
 	// 位置行のINSERTは後追いバッチ化する。実行時の読手は存在せず
@@ -162,17 +155,18 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: recordedAt,
 	})
 
-	// 直前位置は ChairManager が保持するため SELECT 不要。
-	// 走行距離はTX内で同期upsertする。非同期化すると読取時flushの
-	// swap〜書込完了窓で recorded_at<=updated_at かつ未計上の区間が生まれ、
-	// benchの total_distance 検証（want/until照合）に触れるため、
-	// referenceと同一の原子性を保つ。
-	if hasPrev {
-		if err := chairRepository.AddTotalDistance(ctx, tx, chair.ID, calculateDistance(prevLat, prevLon, req.Latitude, req.Longitude)); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	}
+	// 走行距離の追跡は DistanceBuffer がPOST毎に行う。
+	// ChairManagerのエントリ有無に依存しないため、欠落時も追跡継続する。
+	// DB往復（Begin/upsert/Commit）をホットパスから外すのが目的で、
+	// TX内原子性は不要: 遷移判定の読取は不変キャッシュ＋最新コミット読みで等価、
+	// PICKUP/ARRIVED行は下で単発INSERTする。
+	noteCoordPost(hasPrev)
+	globalDistanceBuffer.Add(chair.ID, req.Latitude, req.Longitude, recordedAt)
+	// ticker flush の停滞保険。正常時は atomic load＋分岐のみ。
+	globalDistanceBuffer.MaybeRepair(ctx, recordedAt)
+	// ticker flush の停滞保険。hasPrev の有無に関わらず毎POST監視する。
+	// 正常時は atomic load＋分岐のみ。
+	globalDistanceBuffer.MaybeRepair(ctx, recordedAt)
 
 	rideID, hasRide := globalChairManager.GetCurrentRideID(chair.ID)
 	statusChanged := false
@@ -187,7 +181,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		status, err := globalStatusCache.Get(ctx, tx, rideID)
+		status, err := globalStatusCache.Get(ctx, db, rideID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -195,7 +189,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		if status != "COMPLETED" && status != "CANCELED" {
 			if req.Latitude == coords.PickupLatitude && req.Longitude == coords.PickupLongitude && status == "ENROUTE" {
 				insertedStatusID = ulid.Make().String()
-				if err := rideStatusRepository.Create(ctx, tx, insertedStatusID, rideID, "PICKUP"); err != nil {
+				if err := rideStatusRepository.Create(ctx, db, insertedStatusID, rideID, "PICKUP"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -205,7 +199,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 
 			if req.Latitude == coords.DestinationLatitude && req.Longitude == coords.DestinationLongitude && status == "CARRYING" {
 				insertedStatusID = ulid.Make().String()
-				if err := rideStatusRepository.Create(ctx, tx, insertedStatusID, rideID, "ARRIVED"); err != nil {
+				if err := rideStatusRepository.Create(ctx, db, insertedStatusID, rideID, "ARRIVED"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -214,11 +208,6 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		changedCoords = coords
-	}
-
-	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
 	}
 
 	// PICKUP/ARRIVED 遷移時のみ両SSEを起床させ、キャッシュを更新する

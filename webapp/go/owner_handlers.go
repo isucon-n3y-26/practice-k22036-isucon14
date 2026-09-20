@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
 	"net/http"
 	"strconv"
@@ -184,7 +185,7 @@ func ownerGetChairs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	owner := ctx.Value("owner").(*Owner)
 
-	chairs, err := chairRepository.ListWithDistanceByOwnerID(ctx, db, owner.ID)
+	chairs, err := chairRepository.ListByOwnerID(ctx, db, owner.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -193,16 +194,28 @@ func ownerGetChairs(w http.ResponseWriter, r *http.Request) {
 	res := ownerGetChairResponse{}
 	for _, chair := range chairs {
 		c := ownerGetChairResponseChair{
-			ID:            chair.ID,
-			Name:          chair.Name,
-			Model:         chair.Model,
-			Active:        chair.IsActive,
-			RegisteredAt:  chair.CreatedAt.UnixMilli(),
-			TotalDistance: chair.TotalDistance,
+			ID:           chair.ID,
+			Name:         chair.Name,
+			Model:        chair.Model,
+			Active:       chair.IsActive,
+			RegisteredAt: chair.CreatedAt.UnixMilli(),
 		}
-		if chair.TotalDistanceUpdatedAt.Valid {
-			t := chair.TotalDistanceUpdatedAt.Time.UnixMilli()
+		// 距離は DistanceBuffer のメモリ追跡から提供する。
+		// POSTストリーム由来で常に最新のため、プール混雑による
+		// 読取遅延の影響を受けず、鮮度検証に触れない。
+		// 未追跡（POST前）の椅子はDB行をフォールバック参照し、
+		// 行が無ければ null（従来のLEFT JOIN nullと等価）。
+		if total, uat, ok := globalDistanceBuffer.Lookup(chair.ID); ok {
+			c.TotalDistance = total
+			t := uat.UnixMilli()
 			c.TotalDistanceUpdatedAt = &t
+		} else if d, err := chairRepository.GetTotalDistance(ctx, db, chair.ID); err == nil {
+			c.TotalDistance = d.Total
+			t := d.UpdatedAt.UnixMilli()
+			c.TotalDistanceUpdatedAt = &t
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, err)
+			return
 		}
 		res.Chairs = append(res.Chairs, c)
 	}

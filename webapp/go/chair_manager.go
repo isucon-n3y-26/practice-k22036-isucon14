@@ -196,6 +196,20 @@ func (cm *ChairManager) UpdateLocation(chairID string, lat, lon int) {
 	})
 }
 
+// SnapshotLocations は位置既知の全椅子の最新座標を返す。
+// DistanceBufferのReload同期用（起動時・初期化時のみ呼ぶこと）。
+func (cm *ChairManager) SnapshotLocations() map[string][2]int {
+	out := make(map[string][2]int)
+	cm.chairs.Range(func(key, value any) bool {
+		st := value.(*atomic.Pointer[ChairState]).Load()
+		if st != nil && st.HasLocation {
+			out[key.(string)] = [2]int{st.Latitude, st.Longitude}
+		}
+		return true
+	})
+	return out
+}
+
 // GetCurrentRideID は椅子に割り当て中のライドIDを返す。
 // 未割当時は ok=false。FindBestAvailableChair/Reload で設定され、
 // CompleteRide/UnassignRide でクリアされる。

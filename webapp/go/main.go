@@ -77,6 +77,7 @@ var chairLocationRepository *repository.ChairLocationRepository
 var globalStatusCache *cache.StatusCache
 var globalRideCoordsCache *cache.RideCoordsCache
 var globalLocationBuffer *LocationBuffer
+var globalDistanceBuffer *DistanceBuffer
 var globalStatusLog *StatusLog
 var matcherStarted bool
 
@@ -102,6 +103,7 @@ func main() {
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
 	globalLocationBuffer.Flush(shutdownCtx)
+	globalDistanceBuffer.Flush(shutdownCtx)
 }
 
 func configureLogging() {
@@ -211,6 +213,20 @@ func setup() http.Handler {
 	chairLocationRepository = repository.NewChairLocationRepository(db)
 	globalLocationBuffer = NewLocationBuffer(db)
 	go globalLocationBuffer.Start(context.Background())
+	// DistanceBuffer は共有プールとは別の専用プール（2本）で書込む。
+	// flush が他クエリの混雑によるプール枯渇待ちに巻き込まれると
+	// updated_at が停滞し、total_distance 鮮度検証に触れる。
+	// 座標POST自体はプール不要のため ServerTime だけが進み、
+	// 非対称な停滞になる点に注意（共有プールでは起きない）。
+	distanceDB, err := sqlx.Connect("mysql", dbConfig.FormatDSN())
+	if err != nil {
+		panic(err)
+	}
+	distanceDB.SetMaxOpenConns(2)
+	distanceDB.SetMaxIdleConns(2)
+	distanceDB.SetConnMaxLifetime(2 * time.Minute)
+	globalDistanceBuffer = NewDistanceBuffer(distanceDB)
+	go globalDistanceBuffer.Start(context.Background())
 	globalStatusLog = NewStatusLog()
 	// 決済URLは起動時に読み込み、初期化APIで更新する。以後不変のためキャッシュする。
 	if url, err := settingsRepository.GetPaymentGatewayURL(context.Background(), db); err != nil {
@@ -237,6 +253,9 @@ func setup() http.Handler {
 	})
 
 	if err := globalChairManager.Reload(context.Background(), db); err != nil {
+		panic(err)
+	}
+	if err := globalDistanceBuffer.SyncFromDB(context.Background()); err != nil {
 		panic(err)
 	}
 	if err := reloadChairStats(context.Background(), db); err != nil {
@@ -353,6 +372,11 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	globalStatusCache.Clear()
 	globalRideCoordsCache.Clear()
 	globalLocationBuffer.Discard()
+	globalDistanceBuffer.Discard()
+	if err := globalDistanceBuffer.SyncFromDB(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	globalStatusLog.Clear()
 	if err := reloadStatusLog(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
