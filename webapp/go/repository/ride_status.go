@@ -30,6 +30,28 @@ func (r *RideStatusRepository) Create(ctx context.Context, q Queryer, id, rideID
 	return err
 }
 
+// BulkCreate は状態遷移を multi-row INSERT で書込む。
+// RideStatusBuffer の周期flush用。created_at は呼出し側で遷移時刻を
+// 明示するため、逐次INSERTと順序・時刻の意味は等価。
+// app_sent_at / chair_sent_at はNULL（未送信）のまま残す。
+func (r *RideStatusRepository) BulkCreate(ctx context.Context, q Queryer, rows []models.RideStatus) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO ride_statuses (id, ride_id, status, created_at) VALUES ")
+	args := make([]any, 0, len(rows)*4)
+	for i, row := range rows {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString("(?,?,?,?)")
+		args = append(args, row.ID, row.RideID, row.Status, row.CreatedAt)
+	}
+	_, err := q.ExecContext(ctx, sb.String(), args...)
+	return err
+}
+
 func (r *RideStatusRepository) GetOldestUnsentByRideID(ctx context.Context, q Getter, rideID string) (*models.RideStatus, error) {
 	rideStatus := &models.RideStatus{}
 	if err := q.GetContext(ctx, rideStatus,

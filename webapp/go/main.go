@@ -79,6 +79,7 @@ var globalRideCoordsCache *cache.RideCoordsCache
 var globalLocationBuffer *LocationBuffer
 var globalDistanceBuffer *DistanceBuffer
 var globalSentMarkBuffer *SentMarkBuffer
+var globalRideStatusBuffer *RideStatusBuffer
 var globalStatusLog *StatusLog
 var matcherStarted bool
 
@@ -106,6 +107,7 @@ func main() {
 	globalLocationBuffer.Flush(shutdownCtx)
 	globalDistanceBuffer.Flush(shutdownCtx)
 	globalSentMarkBuffer.Flush(shutdownCtx)
+	globalRideStatusBuffer.Flush(shutdownCtx)
 }
 
 func configureLogging() {
@@ -217,6 +219,8 @@ func setup() http.Handler {
 	go globalLocationBuffer.Start(context.Background())
 	globalSentMarkBuffer = NewSentMarkBuffer(db)
 	go globalSentMarkBuffer.Start(context.Background())
+	globalRideStatusBuffer = NewRideStatusBuffer(db)
+	go globalRideStatusBuffer.Start(context.Background())
 	// DistanceBuffer は共有プールとは別の専用プール（2本）で書込む。
 	// flush が他クエリの混雑によるプール枯渇待ちに巻き込まれると
 	// updated_at が停滞し、total_distance 鮮度検証に触れる。
@@ -377,6 +381,7 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	globalRideCoordsCache.Clear()
 	globalLocationBuffer.Discard()
 	globalSentMarkBuffer.Discard()
+	globalRideStatusBuffer.Discard()
 	globalDistanceBuffer.Discard()
 	if err := globalDistanceBuffer.SyncFromDB(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, err)

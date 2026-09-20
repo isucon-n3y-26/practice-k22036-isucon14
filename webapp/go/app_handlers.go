@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
+
+	"github.com/isucon/isucon14/webapp/go/models"
 )
 
 // queryGetter は *sqlx.DB と *sqlx.Tx の両方を受け付けるためのインターフェース
@@ -403,9 +405,14 @@ func insertRideTx(ctx context.Context, user *User, req *appPostRidesRequest) (ri
 	}
 
 	matchingStatusID = ulid.Make().String()
-	if err := rideStatusRepository.Create(ctx, tx, matchingStatusID, rideID, "MATCHING"); err != nil {
-		return "", "", 0, err
-	}
+	// 遷移行のINSERTは後追いバッチ化する。実行時の読手は StatusCache のみで、
+	// 遷移確定と同時に Set されるため等価。created_at は遷移時刻を明示する。
+	globalRideStatusBuffer.Append(models.RideStatus{
+		ID:        matchingStatusID,
+		RideID:    rideID,
+		Status:    "MATCHING",
+		CreatedAt: time.Now(),
+	})
 
 	// マッチング待ちキューに登録する（同一トランザクション）
 	if err := matchingQueueRepository.Enqueue(ctx, tx, rideID); err != nil {
@@ -625,6 +632,10 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	completedStatusID := ulid.Make().String()
+	// COMPLETED行だけは同期INSERTする。履歴表示（ListCompletedByUserID）と
+	// 売上集計が最新status行をDBから直接読むため、バッファ遅延があると
+	// 完了直後の参照で欠落する（履歴0件・売上0）。他5遷移の読手は
+	// StatusCacheのみで遷移確定と同時にSetされるためバッファ化できる。
 	if err := rideStatusRepository.Create(ctx, tx, completedStatusID, rideID, "COMPLETED"); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

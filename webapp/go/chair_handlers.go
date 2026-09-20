@@ -13,6 +13,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/isucon/isucon14/webapp/go/cache"
+	"github.com/isucon/isucon14/webapp/go/models"
 )
 
 type chairPostChairsRequest struct {
@@ -189,20 +190,25 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		if status != "COMPLETED" && status != "CANCELED" {
 			if req.Latitude == coords.PickupLatitude && req.Longitude == coords.PickupLongitude && status == "ENROUTE" {
 				insertedStatusID = ulid.Make().String()
-				if err := rideStatusRepository.Create(ctx, db, insertedStatusID, rideID, "PICKUP"); err != nil {
-					writeError(w, http.StatusInternalServerError, err)
-					return
-				}
+				// 遷移行のINSERTは後追いバッチ化する（受諾・出発と同等の理由）。
+				globalRideStatusBuffer.Append(models.RideStatus{
+					ID:        insertedStatusID,
+					RideID:    rideID,
+					Status:    "PICKUP",
+					CreatedAt: time.Now(),
+				})
 				statusChanged = true
 				insertedStatus = "PICKUP"
 			}
 
 			if req.Latitude == coords.DestinationLatitude && req.Longitude == coords.DestinationLongitude && status == "CARRYING" {
 				insertedStatusID = ulid.Make().String()
-				if err := rideStatusRepository.Create(ctx, db, insertedStatusID, rideID, "ARRIVED"); err != nil {
-					writeError(w, http.StatusInternalServerError, err)
-					return
-				}
+				globalRideStatusBuffer.Append(models.RideStatus{
+					ID:        insertedStatusID,
+					RideID:    rideID,
+					Status:    "ARRIVED",
+					CreatedAt: time.Now(),
+				})
 				statusChanged = true
 				insertedStatus = "ARRIVED"
 			}
@@ -333,14 +339,9 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx, err := db.Beginx()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
-	ride, err := rideRepository.GetAssignmentByID(ctx, tx, rideID)
+	// 遷移行のINSERTをバッファ化したためTXは不要。読取はautocommitで
+	// 行い、前提条件の判定は最新コミット読みで行う（従来より新鮮）。
+	ride, err := rideRepository.GetAssignmentByID(ctx, db, rideID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, errors.New("ride not found"))
@@ -355,19 +356,21 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 未送信ログ用の状態ID。commit 後・wake 前に Append するため保持する
+	// 未送信ログ用の状態ID。Append の後の wake 前に登録するため保持する
 	statusID := ""
 	switch req.Status {
 	// Acknowledge the ride
 	case "ENROUTE":
 		statusID = ulid.Make().String()
-		if err := rideStatusRepository.Create(ctx, tx, statusID, ride.ID, "ENROUTE"); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
+		globalRideStatusBuffer.Append(models.RideStatus{
+			ID:        statusID,
+			RideID:    ride.ID,
+			Status:    "ENROUTE",
+			CreatedAt: time.Now(),
+		})
 	// After Picking up user
 	case "CARRYING":
-		status, err := globalStatusCache.Get(ctx, tx, ride.ID)
+		status, err := globalStatusCache.Get(ctx, db, ride.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -377,17 +380,14 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		statusID = ulid.Make().String()
-		if err := rideStatusRepository.Create(ctx, tx, statusID, ride.ID, "CARRYING"); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
+		globalRideStatusBuffer.Append(models.RideStatus{
+			ID:        statusID,
+			RideID:    ride.ID,
+			Status:    "CARRYING",
+			CreatedAt: time.Now(),
+		})
 	default:
 		writeError(w, http.StatusBadRequest, errors.New("invalid status"))
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
