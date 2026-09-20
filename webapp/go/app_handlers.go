@@ -741,9 +741,11 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 			return buildAppNotificationData(ctx, db, user.ID, ride, status)
 		},
 		func(ctx context.Context, id string) error {
-			// メモリ追跡の解除とDBの送信済みUPDATEを併用する
+			// メモリ追跡の解除とDBの送信済みUPDATEを併用する。
+			// DB側は SentMarkBuffer に束ねて後追い flush する。
 			globalStatusLog.MarkAppSent(id)
-			return rideStatusRepository.MarkAppSent(ctx, db, id)
+			globalSentMarkBuffer.MarkApp(id)
+			return nil
 		},
 		wake,
 	)

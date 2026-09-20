@@ -283,9 +283,11 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 			return buildChairNotificationData(ctx, ride, status)
 		},
 		func(ctx context.Context, id string) error {
-			// メモリ追跡の解除とDBの送信済みUPDATEを併用する
+			// メモリ追跡の解除とDBの送信済みUPDATEを併用する。
+			// DB側は SentMarkBuffer に束ねて後追い flush する。
 			globalStatusLog.MarkChairSent(id)
-			return rideStatusRepository.MarkChairSent(ctx, db, id)
+			globalSentMarkBuffer.MarkChair(id)
+			return nil
 		},
 		wake,
 	)

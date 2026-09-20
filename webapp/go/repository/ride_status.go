@@ -3,6 +3,9 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -114,6 +117,13 @@ func (r *RideStatusRepository) MarkAppSent(ctx context.Context, q Queryer, id st
 	return err
 }
 
+// MarkAppSentBulk は複数行の app 向け送信済みマーカーを1本のUPDATEで付ける。
+// SentMarkBuffer の周期flush用。意味は単発版の束と等価
+// （NULL行のみ更新・冪等）。
+func (r *RideStatusRepository) MarkAppSentBulk(ctx context.Context, q Queryer, ids []string) error {
+	return markSentBulk(ctx, q, "app_sent_at", ids)
+}
+
 // UnsentStatusRow は未送信行の backfill 用1行。配送先解決のため rides を結合する。
 type UnsentStatusRow struct {
 	ID          string         `db:"id"`
@@ -149,5 +159,43 @@ func (r *RideStatusRepository) MarkChairSent(ctx context.Context, q Queryer, id 
 		"UPDATE ride_statuses SET chair_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ? AND chair_sent_at IS NULL",
 		id,
 	)
+	return err
+}
+
+// MarkChairSentBulk は複数行の chair 向け送信済みマーカーを1本のUPDATEで付ける。
+// SentMarkBuffer の周期flush用。意味は単発版の束と等価
+// （NULL行のみ更新・冪等）。
+func (r *RideStatusRepository) MarkChairSentBulk(ctx context.Context, q Queryer, ids []string) error {
+	return markSentBulk(ctx, q, "chair_sent_at", ids)
+}
+
+// markSentBulk は送信済みマーカーの multi-row UPDATE を組み立てる。
+// column は内部定数（app_sent_at / chair_sent_at）のみ許す。
+func markSentBulk(ctx context.Context, q Queryer, column string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if column != "app_sent_at" && column != "chair_sent_at" {
+		return errors.New("invalid sent_at column")
+	}
+	sorted := make([]string, len(ids))
+	copy(sorted, ids)
+	sort.Strings(sorted)
+	var sb strings.Builder
+	sb.WriteString("UPDATE ride_statuses SET ")
+	sb.WriteString(column)
+	sb.WriteString(" = CURRENT_TIMESTAMP(6) WHERE id IN (")
+	args := make([]any, 0, len(sorted))
+	for i, id := range sorted {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString("?")
+		args = append(args, id)
+	}
+	sb.WriteString(") AND ")
+	sb.WriteString(column)
+	sb.WriteString(" IS NULL")
+	_, err := q.ExecContext(ctx, sb.String(), args...)
 	return err
 }
