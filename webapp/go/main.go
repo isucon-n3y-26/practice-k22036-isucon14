@@ -285,7 +285,7 @@ func setup() http.Handler {
 	}
 
 	mux := chi.NewRouter()
-	mux.Use(middleware.Logger)
+	mux.Use(accessLogger)
 	mux.Use(middleware.Recoverer)
 	mux.HandleFunc("POST /api/initialize", postInitialize)
 
@@ -327,6 +327,9 @@ func setup() http.Handler {
 	{
 		mux.HandleFunc("GET /api/internal/matching", internalGetMatching)
 	}
+
+	// pprof は計測時のみ取得する。取得しない限りコストは発生しない。
+	mux.Mount("/debug", middleware.Profiler())
 
 	return mux
 }

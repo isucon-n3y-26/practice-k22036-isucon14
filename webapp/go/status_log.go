@@ -28,19 +28,65 @@ type statusLogRide struct {
 // 全遷移が本アプリ経由で発生するため、commit 直後に Append すれば
 // 未送信ポーリングと等価になり、接続数×1秒の重いCTEを排除できる。
 // DB側のINSERT・送信済みUPDATEは durability と backfill 用に残す。
+// 参照は椅子・ユーザー単位のため、byChair/byUser の二次索引を持ち、
+// 全ライド走査をしない。各ミューテーションで不変条件
+// （byChair[c] = {ChairID==c のライド}、byUser も同様）を維持する。
 type StatusLog struct {
-	mu    sync.Mutex
-	rides map[string]*statusLogRide
-	byID  map[string]*statusLogEntry
+	mu      sync.Mutex
+	rides   map[string]*statusLogRide
+	byID    map[string]*statusLogEntry
+	byChair map[string]map[string]*statusLogRide
+	byUser  map[string]map[string]*statusLogRide
 }
 
 func NewStatusLog() *StatusLog {
 	return &StatusLog{
-		rides: make(map[string]*statusLogRide),
-		byID:  make(map[string]*statusLogEntry),
+		rides:   make(map[string]*statusLogRide),
+		byID:    make(map[string]*statusLogEntry),
+		byChair: make(map[string]map[string]*statusLogRide),
+		byUser:  make(map[string]map[string]*statusLogRide),
 	}
 }
 
+// linkLocked は二次索引へライドを登録する。mu 保持中に呼ぶこと。
+func (l *StatusLog) linkLocked(rideID string, rl *statusLogRide) {
+	if rl.ChairID != "" {
+		set := l.byChair[rl.ChairID]
+		if set == nil {
+			set = make(map[string]*statusLogRide)
+			l.byChair[rl.ChairID] = set
+		}
+		set[rideID] = rl
+	}
+	if rl.UserID != "" {
+		set := l.byUser[rl.UserID]
+		if set == nil {
+			set = make(map[string]*statusLogRide)
+			l.byUser[rl.UserID] = set
+		}
+		set[rideID] = rl
+	}
+}
+
+// unlinkLocked は二次索引からライドを外す。mu 保持中に呼ぶこと。
+func (l *StatusLog) unlinkLocked(rideID string, rl *statusLogRide) {
+	if rl.ChairID != "" {
+		if set := l.byChair[rl.ChairID]; set != nil {
+			delete(set, rideID)
+			if len(set) == 0 {
+				delete(l.byChair, rl.ChairID)
+			}
+		}
+	}
+	if rl.UserID != "" {
+		if set := l.byUser[rl.UserID]; set != nil {
+			delete(set, rideID)
+			if len(set) == 0 {
+				delete(l.byUser, rl.UserID)
+			}
+		}
+	}
+}
 // Append は遷移の追跡を開始する。commit 後・wake 前に呼ぶこと。
 func (l *StatusLog) Append(id, rideID, status, userID, chairID string, createdAt time.Time) {
 	l.mu.Lock()
@@ -49,6 +95,9 @@ func (l *StatusLog) Append(id, rideID, status, userID, chairID string, createdAt
 	if !ok {
 		rl = &statusLogRide{}
 		l.rides[rideID] = rl
+	} else {
+		// 既存の索引キーが変わる場合に備え、先に外してから付け直す。
+		l.unlinkLocked(rideID, rl)
 	}
 	if userID != "" {
 		rl.UserID = userID
@@ -59,6 +108,9 @@ func (l *StatusLog) Append(id, rideID, status, userID, chairID string, createdAt
 	e := &statusLogEntry{ID: id, RideID: rideID, Status: status, CreatedAt: createdAt}
 	rl.Entries = append(rl.Entries, e)
 	l.byID[id] = e
+	// 既存ライドへの追記時も配送先が埋まる場合があるため、毎回索引を整える。
+	// 同一キーへの再登録は冪等。
+	l.linkLocked(rideID, rl)
 }
 
 // SetChair は割当確定を反映する（MATCHING行の配送先設定）。
@@ -67,7 +119,12 @@ func (l *StatusLog) SetChair(rideID, chairID string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if rl, ok := l.rides[rideID]; ok {
+		if rl.ChairID == chairID {
+			return
+		}
+		l.unlinkLocked(rideID, rl)
 		rl.ChairID = chairID
+		l.linkLocked(rideID, rl)
 	}
 }
 
@@ -83,12 +140,10 @@ func (l *StatusLog) ListUnsentForChair(chairID string, limit int) []RideStatus {
 	}
 	var cands []candidate
 	// 1. 当該椅子のライドから、未送信を持つものだけを集める。
+	// 二次索引により自椅子のライドのみ走査する（全走査と同集合）。
 	// priority は COMPLETED 未送信あり=0・なし=1（SQLのMIN(CASE...)と等価）、
 	// oldest は最古の未送信時刻（SQLのMIN(created_at)と等価）。
-	for _, rl := range l.rides {
-		if rl.ChairID != chairID {
-			continue
-		}
+	for _, rl := range l.byChair[chairID] {
 		has := false
 		priority := 1
 		var oldest time.Time
@@ -138,11 +193,10 @@ func (l *StatusLog) ListUnsentForUser(userID string, limit int) []RideStatus {
 	defer l.mu.Unlock()
 	// タイの決定性を保つためライドID順に集めて安定ソートする。
 	// （SQL版も同刻の順序は不定のため、決定性の範囲で等価）
+	// 二次索引により自ユーザーのライドのみ走査する（全走査と同集合）。
 	var rideIDs []string
-	for rideID, rl := range l.rides {
-		if rl.UserID == userID {
-			rideIDs = append(rideIDs, rideID)
-		}
+	for rideID := range l.byUser[userID] {
+		rideIDs = append(rideIDs, rideID)
 	}
 	sort.Strings(rideIDs)
 	var all []*statusLogEntry
@@ -187,6 +241,7 @@ func (l *StatusLog) markSent(id string, chair bool) {
 				}
 			}
 			if len(rl.Entries) == 0 {
+				l.unlinkLocked(e.RideID, rl)
 				delete(l.rides, e.RideID)
 			}
 		}
@@ -204,6 +259,8 @@ func (l *StatusLog) Clear() {
 	l.mu.Lock()
 	l.rides = make(map[string]*statusLogRide)
 	l.byID = make(map[string]*statusLogEntry)
+	l.byChair = make(map[string]map[string]*statusLogRide)
+	l.byUser = make(map[string]map[string]*statusLogRide)
 	l.mu.Unlock()
 }
 
@@ -230,6 +287,8 @@ func (l *StatusLog) Backfill(rows []repository.UnsentStatusRow) {
 		}
 		rl.Entries = append(rl.Entries, e)
 		l.byID[row.ID] = e
+		// 同一ライドの複数行で配送先が埋まるため、毎行索引を整える（冪等）。
+		l.linkLocked(row.RideID, rl)
 		l.mu.Unlock()
 	}
 }

@@ -165,9 +165,6 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	globalDistanceBuffer.Add(chair.ID, req.Latitude, req.Longitude, recordedAt)
 	// ticker flush の停滞保険。正常時は atomic load＋分岐のみ。
 	globalDistanceBuffer.MaybeRepair(ctx, recordedAt)
-	// ticker flush の停滞保険。hasPrev の有無に関わらず毎POST監視する。
-	// 正常時は atomic load＋分岐のみ。
-	globalDistanceBuffer.MaybeRepair(ctx, recordedAt)
 
 	rideID, hasRide := globalChairManager.GetCurrentRideID(chair.ID)
 	statusChanged := false

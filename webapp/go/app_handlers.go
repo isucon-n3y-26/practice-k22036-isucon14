@@ -691,8 +691,8 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 
 	if ride.ChairID.Valid {
 		// マッチング用には即時解放する（キュー停滞を防ぐ）。
-		// nearby表示側の猶予は ChairState.FreedAt で扱うため、
-		// ここでの遅延は不要。
+		// nearby表示側の50ms猶予は ChairState.FreedAt で扱い、
+		// 評価応答のbench側反映（Evaluated）を待ってから載せる。
 		globalChairManager.CompleteRide(ride.ChairID.String)
 		// 通知用統計に確定分を加算する（DB再集計と等価）。
 		addChairStats(ride.ChairID.String, req.Evaluation)

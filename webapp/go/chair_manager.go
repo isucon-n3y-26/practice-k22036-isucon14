@@ -12,11 +12,14 @@ import (
 )
 
 // nearbyGraceMs は割当解除後にnearby表示から除外し続ける猶予。
-// benchの評価応答到達（同一VPCでサブms、スケジューリング遅延込みでも
-// 数ms）に対し十分な余裕を持たせつつ、LACK側の3秒静止条件には
-// 干渉しない桁に収める。マッチング側は即時解放のため、この値は
-// スループットに影響しない（nearbyの表示のみ）。
-const nearbyGraceMs = 200
+// 解除（評価処理＝評価リクエスト受信後）からbench側のEvaluated反映
+// （評価応答の受信・処理後）までの間だけ隠す。benchの「ライド中」検証
+// （CODE=30）は応答に含まれた椅子の最新ライドが未評価だと警告になるため、
+// この猶予でEvaluated反映より先の再出現を防ぐ。実測の危険窓は約8msの
+// ため、50msで十分な余裕がある。長すぎると逆に不足警告（CODE=31）の
+// 窓になるため、最小限に留める。マッチング側は即時解放のため、
+// この値はスループットに影響しない（nearbyの表示のみ）。
+const nearbyGraceMs = 50
 
 // ChairState は椅子1台の状態。不変値として atomic.Pointer で保持し、
 // 読取はロックフリー、書込みは stripe ロック下で copy-on-write する。
@@ -35,8 +38,10 @@ type ChairState struct {
 	CurrentRideID string
 	// FreedAt は直近の割当解除時刻（UnixMilli）。nearby表示のみ猶予付きで
 	// 除外するためのもので、マッチングの空き判定には使わない。
-	// COMPLETED応答より先にnearbyへ再出現するとbenchの「ライド中」検証に
-	// 触れるため、解除直後は表示上まだ riding 扱いにする。
+	// 評価応答のbench側反映（Evaluated）より先に再出現すると
+	// 「ライド中」検証（CODE=30）に触れるため、解除直後は表示上
+	// まだ riding 扱いにする。猶予は50msに留め、不足警告（CODE=31）の
+	// 窓を最小化する。
 	FreedAt int64
 }
 
@@ -45,6 +50,32 @@ type ChairManager struct {
 	modelMu     sync.Mutex
 	modelSpeeds map[string]int
 	stripes     [256]sync.Mutex
+	// ordered は走査用スナップショット。sync.Map.Range（型アサート・
+	// クロージャ・interface boxing 付き）と等価だが高速。
+	// 登録・削除時のみ作り直し、走査はロック保持なしで読む。
+	// 要素は atomic.Pointer のため状態は常に最新。
+	ordMu   sync.RWMutex
+	ordered []*atomic.Pointer[ChairState]
+}
+
+// rebuildOrderedLocked は ordered を作り直す。登録・削除時に呼ぶこと。
+// 初期化・椅子登録の同期パスでのみ呼ぶため、走査側と競合しない。
+func (cm *ChairManager) rebuildOrdered() {
+	list := make([]*atomic.Pointer[ChairState], 0, 1024)
+	cm.chairs.Range(func(_, value any) bool {
+		list = append(list, value.(*atomic.Pointer[ChairState]))
+		return true
+	})
+	cm.ordMu.Lock()
+	cm.ordered = list
+	cm.ordMu.Unlock()
+}
+
+// snapshot は走査用スライスを返す。要素の指す状態は atomic で最新。
+func (cm *ChairManager) snapshot() []*atomic.Pointer[ChairState] {
+	cm.ordMu.RLock()
+	defer cm.ordMu.RUnlock()
+	return cm.ordered
 }
 
 var globalChairManager = &ChairManager{
@@ -151,6 +182,7 @@ func (cm *ChairManager) Reload(ctx context.Context, db *sqlx.DB) error {
 		}
 		return true
 	})
+	cm.rebuildOrdered()
 
 	for _, l := range locs {
 		l := l
@@ -179,7 +211,9 @@ func (cm *ChairManager) RegisterChair(id, name, model string) {
 		IsActive: false,
 	})
 	// 同ID再登録時は既存のライブ状態を優先する
-	_, _ = cm.chairs.LoadOrStore(id, p)
+	if _, loaded := cm.chairs.LoadOrStore(id, p); !loaded {
+		cm.rebuildOrdered()
+	}
 }
 
 func (cm *ChairManager) SetActivity(chairID string, isActive bool) {
@@ -200,13 +234,12 @@ func (cm *ChairManager) UpdateLocation(chairID string, lat, lon int) {
 // DistanceBufferのReload同期用（起動時・初期化時のみ呼ぶこと）。
 func (cm *ChairManager) SnapshotLocations() map[string][2]int {
 	out := make(map[string][2]int)
-	cm.chairs.Range(func(key, value any) bool {
-		st := value.(*atomic.Pointer[ChairState]).Load()
+	for _, p := range cm.snapshot() {
+		st := p.Load()
 		if st != nil && st.HasLocation {
-			out[key.(string)] = [2]int{st.Latitude, st.Longitude}
+			out[st.ID] = [2]int{st.Latitude, st.Longitude}
 		}
-		return true
-	})
+	}
 	return out
 }
 
@@ -250,6 +283,10 @@ func (cm *ChairManager) AssignRide(chairID, rideID string) {
 }
 
 func (cm *ChairManager) CompleteRide(chairID string) {
+	// 割当を即時解除し、nearby表示上は50msだけ riding 扱いを続ける。
+	// 解除は評価リクエスト受信後に行い、表示は評価応答のbench側反映を
+	// 待ってから戻すことで、「ライド中」検証（CODE=30）を回避する。
+	// 猶予は実測の危険窓（約8ms）に見合う最小限とし、不足警告を抑える。
 	cm.update(chairID, func(st *ChairState) {
 		st.CurrentRideID = ""
 		st.FreedAt = time.Now().UnixMilli()
@@ -272,21 +309,20 @@ func (cm *ChairManager) FindBestAvailableChair(pickupLat, pickupLon int, rideID 
 		bestDistance := math.MaxInt
 		hasBest := false
 
-		cm.chairs.Range(func(key, value any) bool {
-			st := value.(*atomic.Pointer[ChairState]).Load()
+		for _, p := range cm.snapshot() {
+			st := p.Load()
 			if st == nil || !st.IsActive || !st.HasLocation || st.CurrentRideID != "" {
-				return true
+				continue
 			}
 			dist := calculateDistance(pickupLat, pickupLon, st.Latitude, st.Longitude)
 			estimatedTime := float64(dist) / float64(st.Speed)
 			if estimatedTime < bestTime || (estimatedTime == bestTime && dist < bestDistance) {
 				bestTime = estimatedTime
 				bestDistance = dist
-				bestID = key.(string)
+				bestID = st.ID
 				hasBest = true
 			}
-			return true
-		})
+		}
 		if !hasBest {
 			return nil, false
 		}
@@ -313,19 +349,17 @@ func (cm *ChairManager) FindBestAvailableChair(pickupLat, pickupLon int, rideID 
 }
 
 func (cm *ChairManager) GetNearbyChairs(lat, lon, distance int) []appGetNearbyChairsResponseChair {
-	// マッチングと違い、nearbyは解放直後も猶予付きで除外する。
-	// benchが評価応答を受け取る（Evaluated反映）より先に再出現すると
-	// 「ライド中」検証に触れるため。完了直後の椅子は3秒静止条件に
-	// 当たらないので、逆方向の不足誤検知は生じない。
+	// 非表示条件は割当中＋解放直後の猶予（50ms）のみ。
+	// 猶予は評価応答のbench側反映待ちで、不足警告の窓を最小化する。
 	now := time.Now().UnixMilli()
 	nearby := make([]appGetNearbyChairsResponseChair, 0)
-	cm.chairs.Range(func(_, value any) bool {
-		st := value.(*atomic.Pointer[ChairState]).Load()
+	for _, p := range cm.snapshot() {
+		st := p.Load()
 		if st == nil || !st.IsActive || !st.HasLocation || st.CurrentRideID != "" {
-			return true
+			continue
 		}
 		if now-st.FreedAt < nearbyGraceMs {
-			return true
+			continue
 		}
 		if calculateDistance(lat, lon, st.Latitude, st.Longitude) <= distance {
 			nearby = append(nearby, appGetNearbyChairsResponseChair{
@@ -338,7 +372,6 @@ func (cm *ChairManager) GetNearbyChairs(lat, lon, distance int) []appGetNearbyCh
 				},
 			})
 		}
-		return true
-	})
+	}
 	return nearby
 }
