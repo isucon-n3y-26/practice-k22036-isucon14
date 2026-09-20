@@ -80,6 +80,7 @@ var globalLocationBuffer *LocationBuffer
 var globalDistanceBuffer *DistanceBuffer
 var globalSentMarkBuffer *SentMarkBuffer
 var globalRideStatusBuffer *RideStatusBuffer
+var globalHistoryCache *UserHistoryCache
 var globalStatusLog *StatusLog
 var matcherStarted bool
 
@@ -221,6 +222,7 @@ func setup() http.Handler {
 	go globalSentMarkBuffer.Start(context.Background())
 	globalRideStatusBuffer = NewRideStatusBuffer(db)
 	go globalRideStatusBuffer.Start(context.Background())
+	globalHistoryCache = NewUserHistoryCache()
 	// DistanceBuffer は共有プールとは別の専用プール（2本）で書込む。
 	// flush が他クエリの混雑によるプール枯渇待ちに巻き込まれると
 	// updated_at が停滞し、total_distance 鮮度検証に触れる。
@@ -379,6 +381,7 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	// DB初期化で全データが破棄されるため、各種キャッシュもクリアする
 	globalStatusCache.Clear()
 	globalRideCoordsCache.Clear()
+	globalHistoryCache.Clear()
 	globalLocationBuffer.Discard()
 	globalSentMarkBuffer.Discard()
 	globalRideStatusBuffer.Discard()

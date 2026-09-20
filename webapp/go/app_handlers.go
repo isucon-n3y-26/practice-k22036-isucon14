@@ -224,15 +224,37 @@ type getAppRidesResponseItemChair struct {
 }
 
 // 完了済みライド履歴を返す。ライド毎の関連取得は3回の一括取得にまとめる。
+// 履歴は評価確定時にしか変わらないため、評価ハンドラで無効化する
+// インメモリキャッシュを併用する。
 func appGetRides(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := ctx.Value("user").(*User)
 
-	// 履歴対象の完了ライド一覧
-	rides, err := rideRepository.ListCompletedByUserID(ctx, db, user.ID)
+	if items, ok := globalHistoryCache.Get(user.ID); ok {
+		writeJSON(w, http.StatusOK, &getAppRidesResponse{
+			Rides: items,
+		})
+		return
+	}
+
+	items, err := buildUserHistory(ctx, user.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	globalHistoryCache.Set(user.ID, items)
+
+	writeJSON(w, http.StatusOK, &getAppRidesResponse{
+		Rides: items,
+	})
+}
+
+// buildUserHistory はユーザー別完了履歴をDBから組み立てる。
+func buildUserHistory(ctx context.Context, userID string) ([]getAppRidesResponseItem, error) {
+	// 履歴対象の完了ライド一覧
+	rides, err := rideRepository.ListCompletedByUserID(ctx, db, userID)
+	if err != nil {
+		return nil, err
 	}
 
 	// 運賃・椅子・オーナー表示用の関連データを一括取得してmap化する
@@ -250,8 +272,7 @@ func appGetRides(w http.ResponseWriter, r *http.Request) {
 		// ライドに紐づくクーポンの割引額
 		coupons, err := couponRepository.ListByUsedByIDs(ctx, db, rideIDs)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
+			return nil, err
 		}
 		for _, coupon := range coupons {
 			if coupon.UsedBy != nil {
@@ -266,8 +287,7 @@ func appGetRides(w http.ResponseWriter, r *http.Request) {
 		}
 		chairs, err := chairRepository.ListByIDs(ctx, db, chairIDs)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
+			return nil, err
 		}
 		ownerIDSet := make(map[string]struct{}, len(chairs))
 		for _, chair := range chairs {
@@ -282,8 +302,7 @@ func appGetRides(w http.ResponseWriter, r *http.Request) {
 		}
 		owners, err := ownerRepository.ListByIDs(ctx, db, ownerIDs)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
+			return nil, err
 		}
 		for _, owner := range owners {
 			ownerNameByID[owner.ID] = owner.Name
@@ -314,10 +333,7 @@ func appGetRides(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	}
-
-	writeJSON(w, http.StatusOK, &getAppRidesResponse{
-		Rides: items,
-	})
+	return items, nil
 }
 
 type appPostRidesRequest struct {
@@ -656,6 +672,9 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
+	// 評価確定で履歴が増えるためキャッシュを無効化する（コミット後）。
+	globalHistoryCache.Invalidate(ride.UserID)
 
 	if ride.ChairID.Valid {
 		// マッチング用には即時解放する（キュー停滞を防ぐ）。
