@@ -6,9 +6,17 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 )
+
+// nearbyGraceMs は割当解除後にnearby表示から除外し続ける猶予。
+// benchの評価応答到達（同一VPCでサブms、スケジューリング遅延込みでも
+// 数ms）に対し十分な余裕を持たせつつ、LACK側の3秒静止条件には
+// 干渉しない桁に収める。マッチング側は即時解放のため、この値は
+// スループットに影響しない（nearbyの表示のみ）。
+const nearbyGraceMs = 200
 
 // ChairState は椅子1台の状態。不変値として atomic.Pointer で保持し、
 // 読取はロックフリー、書込みは stripe ロック下で copy-on-write する。
@@ -25,6 +33,11 @@ type ChairState struct {
 	Longitude     int
 	HasLocation   bool
 	CurrentRideID string
+	// FreedAt は直近の割当解除時刻（UnixMilli）。nearby表示のみ猶予付きで
+	// 除外するためのもので、マッチングの空き判定には使わない。
+	// COMPLETED応答より先にnearbyへ再出現するとbenchの「ライド中」検証に
+	// 触れるため、解除直後は表示上まだ riding 扱いにする。
+	FreedAt int64
 }
 
 type ChairManager struct {
@@ -80,12 +93,8 @@ func (cm *ChairManager) update(id string, fn func(*ChairState)) {
 }
 
 func (cm *ChairManager) Reload(ctx context.Context, db *sqlx.DB) error {
-	type modelRow struct {
-		Name  string `db:"name"`
-		Speed int    `db:"speed"`
-	}
-	var models []modelRow
-	if err := db.SelectContext(ctx, &models, "SELECT name, speed FROM chair_models"); err != nil {
+	models, err := chairModelRepository.ListAll(ctx, db)
+	if err != nil {
 		return err
 	}
 	freshSpeeds := make(map[string]int, len(models))
@@ -93,49 +102,18 @@ func (cm *ChairManager) Reload(ctx context.Context, db *sqlx.DB) error {
 		freshSpeeds[m.Name] = m.Speed
 	}
 
-	type chairRow struct {
-		ID       string `db:"id"`
-		Name     string `db:"name"`
-		Model    string `db:"model"`
-		IsActive bool   `db:"is_active"`
-	}
-	var chairs []chairRow
-	if err := db.SelectContext(ctx, &chairs, "SELECT id, name, model, is_active FROM chairs"); err != nil {
+	chairs, err := chairRepository.ListAll(ctx, db)
+	if err != nil {
 		return err
 	}
 
-	type locRow struct {
-		ChairID   string `db:"chair_id"`
-		Latitude  int    `db:"latitude"`
-		Longitude int    `db:"longitude"`
-	}
-	var locs []locRow
-	if err := db.SelectContext(ctx, &locs, `
-		SELECT chair_id, latitude, longitude
-		FROM (
-			SELECT chair_id, latitude, longitude,
-			       ROW_NUMBER() OVER (PARTITION BY chair_id ORDER BY created_at DESC) as rn
-			FROM chair_locations
-		) t
-		WHERE rn = 1
-	`); err != nil {
+	locs, err := chairRepository.GetLatestLocations(ctx, db)
+	if err != nil {
 		return err
 	}
 
-	type incompleteRideRow struct {
-		ChairID string `db:"chair_id"`
-		RideID  string `db:"id"`
-	}
-	var incompleteRides []incompleteRideRow
-	if err := db.SelectContext(ctx, &incompleteRides, `
-		SELECT r.id, r.chair_id
-		FROM rides r
-		JOIN (
-			SELECT ride_id, status FROM ride_statuses rs
-			WHERE rs.created_at = (SELECT MAX(created_at) FROM ride_statuses WHERE ride_id = rs.ride_id)
-		) latest_rs ON latest_rs.ride_id = r.id
-		WHERE r.chair_id IS NOT NULL AND latest_rs.status <> 'COMPLETED'
-	`); err != nil {
+	incompleteRides, err := rideRepository.ListIncompleteRides(ctx, db)
+	if err != nil {
 		return err
 	}
 
@@ -260,6 +238,7 @@ func (cm *ChairManager) AssignRide(chairID, rideID string) {
 func (cm *ChairManager) CompleteRide(chairID string) {
 	cm.update(chairID, func(st *ChairState) {
 		st.CurrentRideID = ""
+		st.FreedAt = time.Now().UnixMilli()
 	})
 }
 
@@ -320,10 +299,18 @@ func (cm *ChairManager) FindBestAvailableChair(pickupLat, pickupLon int, rideID 
 }
 
 func (cm *ChairManager) GetNearbyChairs(lat, lon, distance int) []appGetNearbyChairsResponseChair {
+	// マッチングと違い、nearbyは解放直後も猶予付きで除外する。
+	// benchが評価応答を受け取る（Evaluated反映）より先に再出現すると
+	// 「ライド中」検証に触れるため。完了直後の椅子は3秒静止条件に
+	// 当たらないので、逆方向の不足誤検知は生じない。
+	now := time.Now().UnixMilli()
 	nearby := make([]appGetNearbyChairsResponseChair, 0)
 	cm.chairs.Range(func(_, value any) bool {
 		st := value.(*atomic.Pointer[ChairState]).Load()
 		if st == nil || !st.IsActive || !st.HasLocation || st.CurrentRideID != "" {
+			return true
+		}
+		if now-st.FreedAt < nearbyGraceMs {
 			return true
 		}
 		if calculateDistance(lat, lon, st.Latitude, st.Longitude) <= distance {

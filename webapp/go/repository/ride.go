@@ -39,6 +39,24 @@ func (r *RideRepository) GetByID(ctx context.Context, q Getter, rideID string) (
 	return ride, nil
 }
 
+// ListIncompleteRides は最新状態がCOMPLETEDでない割当済みライドを返す。
+// ChairManagerの起動時再構築用。
+func (r *RideRepository) ListIncompleteRides(ctx context.Context, q Selecter) ([]models.IncompleteRide, error) {
+	rows := []models.IncompleteRide{}
+	if err := q.SelectContext(ctx, &rows, `
+		SELECT r.id, r.chair_id
+		FROM rides r
+		JOIN (
+			SELECT ride_id, status FROM ride_statuses rs
+			WHERE rs.created_at = (SELECT MAX(created_at) FROM ride_statuses WHERE ride_id = rs.ride_id)
+		) latest_rs ON latest_rs.ride_id = r.id
+		WHERE r.chair_id IS NOT NULL AND latest_rs.status <> 'COMPLETED'
+	`); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 // GetAssignmentByID は割当確認用に id/user_id/chair_id のみを取得する。
 // 存在・割当確認のみが目的のため FOR UPDATE は付けない。
 func (r *RideRepository) GetAssignmentByID(ctx context.Context, q Getter, rideID string) (*models.Ride, error) {

@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -107,6 +109,21 @@ type chairPostCoordinateResponse struct {
 	RecordedAt int64 `json:"recorded_at"`
 }
 
+// 同一椅子の座標POST直列化用ストライプドロック。
+// 直前位置の読取(GetLocation)→距離加算→最新位置の公開(UpdateLocation)を
+// 椅子毎に直列化し、同時POSTによる二重計上・逆転を防ぐ。
+// (benchは椅子毎に逐次POSTだが、クライアントタイムアウト後のリトライ重複や
+//  サーバ側の遅延で重なる場合がある。単一appプロセス前提)
+// ロック保持がTX時間（数十ms）に及ぶため、異椅子間の衝突を避ける目的で
+// 十分に粗く取る（65536本で1500台なら共有はほぼ発生しない）。
+var coordinateLocks [65536]sync.Mutex
+
+func coordinateLockFor(chairID string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(chairID))
+	return &coordinateLocks[h.Sum32()%uint32(len(coordinateLocks))]
+}
+
 func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	req := &Coordinate{}
@@ -116,6 +133,10 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	chair := ctx.Value("chair").(*Chair)
+
+	lk := coordinateLockFor(chair.ID)
+	lk.Lock()
+	defer lk.Unlock()
 
 	tx, err := db.Beginx()
 	if err != nil {

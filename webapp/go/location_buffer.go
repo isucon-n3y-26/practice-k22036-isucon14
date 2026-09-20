@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/jmoiron/sqlx"
+
+	"github.com/isucon/isucon14/webapp/go/models"
 )
 
 // locationEntry は chair_locations への後追いINSERT待ち1行。
@@ -82,7 +83,17 @@ func (b *LocationBuffer) Flush(ctx context.Context) {
 		n := min(len(batch), b.batchMax)
 		chunk := batch[:n]
 		batch = batch[n:]
-		if err := insertLocationChunk(ctx, b.db, chunk); err != nil {
+		locs := make([]models.ChairLocation, 0, len(chunk))
+		for _, e := range chunk {
+			locs = append(locs, models.ChairLocation{
+				ID:        e.ID,
+				ChairID:   e.ChairID,
+				Latitude:  e.Latitude,
+				Longitude: e.Longitude,
+				CreatedAt: e.CreatedAt,
+			})
+		}
+		if err := chairLocationRepository.BulkCreate(ctx, b.db, locs); err != nil {
 			slog.Error("failed to flush chair locations", "error", err, "rows", len(chunk))
 			b.mu.Lock()
 			b.pending = append(chunk, append(batch, b.pending...)...)
@@ -92,17 +103,3 @@ func (b *LocationBuffer) Flush(ctx context.Context) {
 	}
 }
 
-func insertLocationChunk(ctx context.Context, db *sqlx.DB, chunk []locationEntry) error {
-	var sb strings.Builder
-	sb.WriteString(`INSERT INTO chair_locations (id, chair_id, latitude, longitude, created_at) VALUES `)
-	args := make([]any, 0, len(chunk)*5)
-	for i, e := range chunk {
-		if i > 0 {
-			sb.WriteString(",")
-		}
-		sb.WriteString("(?,?,?,?,?)")
-		args = append(args, e.ID, e.ChairID, e.Latitude, e.Longitude, e.CreatedAt)
-	}
-	_, err := db.ExecContext(ctx, sb.String(), args...)
-	return err
-}

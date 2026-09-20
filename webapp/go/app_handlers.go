@@ -647,7 +647,12 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if ride.ChairID.Valid {
+		// マッチング用には即時解放する（キュー停滞を防ぐ）。
+		// nearby表示側の猶予は ChairState.FreedAt で扱うため、
+		// ここでの遅延は不要。
 		globalChairManager.CompleteRide(ride.ChairID.String)
+		// 通知用統計に確定分を加算する（DB再集計と等価）。
+		addChairStats(ride.ChairID.String, req.Evaluation)
 	}
 
 	// COMPLETED 作成を両SSEに通知する
@@ -789,19 +794,17 @@ func buildAppNotificationData(ctx context.Context, q queryGetter, userID string,
 // getChairStats はユーザー向け通知に含める椅子の統計情報
 // （完了ライド数と評価平均）を返す。
 // 完了の定義は ARRIVED・CARRYING・COMPLETED の各ステータスを
-// すべて含むライドであること。集計自体は
-// ChairRepository.GetCompletedStats に1クエリで委譲しており、
-// 戻り値を通知用の型に詰め替える薄いラッパーである。
+// すべて含むライドであること。値はインメモリ集計から読む:
+// 起動時・初期化時にDBから一括復元し、以後はCOMPLETED確定のたびに
+// 加算するため、DB再集計と等価。通知は毎秒数百回飛ぶため、
+// 都度EXISTS×3のクエリを投げる実装ではDBが飽和する。
 func getChairStats(ctx context.Context, q queryGetter, chairID string) (appGetNotificationResponseChairStats, error) {
 	stats := appGetNotificationResponseChairStats{}
 
-	s, err := chairRepository.GetCompletedStats(ctx, q, chairID)
-	if err != nil {
-		return stats, err
-	}
+	count, avg := getCachedChairStats(chairID)
 
-	stats.TotalRidesCount = s.TotalRidesCount
-	stats.TotalEvaluationAvg = s.TotalEvaluationAvg
+	stats.TotalRidesCount = int(count)
+	stats.TotalEvaluationAvg = avg
 
 	return stats, nil
 }

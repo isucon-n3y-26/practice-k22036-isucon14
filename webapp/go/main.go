@@ -72,6 +72,8 @@ var couponRepository *repository.CouponRepository
 var ownerRepository *repository.OwnerRepository
 var paymentTokenRepository *repository.PaymentTokenRepository
 var settingsRepository *repository.SettingsRepository
+var chairModelRepository *repository.ChairModelRepository
+var chairLocationRepository *repository.ChairLocationRepository
 var globalStatusCache *cache.StatusCache
 var globalRideCoordsCache *cache.RideCoordsCache
 var globalLocationBuffer *LocationBuffer
@@ -205,6 +207,8 @@ func setup() http.Handler {
 	ownerRepository = repository.NewOwnerRepository(db)
 	paymentTokenRepository = repository.NewPaymentTokenRepository(db)
 	settingsRepository = repository.NewSettingsRepository(db)
+	chairModelRepository = repository.NewChairModelRepository(db)
+	chairLocationRepository = repository.NewChairLocationRepository(db)
 	globalLocationBuffer = NewLocationBuffer(db)
 	go globalLocationBuffer.Start(context.Background())
 	globalStatusLog = NewStatusLog()
@@ -233,6 +237,9 @@ func setup() http.Handler {
 	})
 
 	if err := globalChairManager.Reload(context.Background(), db); err != nil {
+		panic(err)
+	}
+	if err := reloadChairStats(context.Background(), db); err != nil {
 		panic(err)
 	}
 	if err := reloadStatusLog(context.Background()); err != nil {
@@ -334,6 +341,10 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	paymentGatewayBaseURL = req.PaymentServer
 
 	if err := globalChairManager.Reload(ctx, db); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := reloadChairStats(ctx, db); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

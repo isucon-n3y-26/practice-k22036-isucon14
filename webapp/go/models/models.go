@@ -48,6 +48,12 @@ type ChairLocation struct {
 	CreatedAt time.Time `db:"created_at"`
 }
 
+// IncompleteRide は未完了ライドの割当。ChairManagerの起動時再構築用。
+type IncompleteRide struct {
+	ChairID string `db:"chair_id"`
+	RideID  string `db:"id"`
+}
+
 type User struct {
 	ID             string    `db:"id"`
 	Username       string    `db:"username"`

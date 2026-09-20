@@ -80,10 +80,11 @@ func (r *CouponRepository) GetOldestUnusedForUpdate(ctx context.Context, q Gette
 }
 
 // ClaimByCode は指定クーポンをライドに紐付けて確定する。
+// 未使用行のみ対象とし、異常時の上書き付け替えを防ぐ。
 func (r *CouponRepository) ClaimByCode(ctx context.Context, q Queryer, rideID, userID, code string) error {
 	_, err := q.ExecContext(
 		ctx,
-		"UPDATE coupons SET used_by = ? WHERE user_id = ? AND code = ?",
+		"UPDATE coupons SET used_by = ? WHERE user_id = ? AND code = ? AND used_by IS NULL",
 		rideID, userID, code,
 	)
 	return err
