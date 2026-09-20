@@ -22,6 +22,16 @@ func isRetryableDBError(err error) bool {
 	return false
 }
 
+// isDupEntryError は重複キーエラー (1062) かどうかを返す。
+// ユーザー登録の username 衝突検出用。
+func isDupEntryError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1062
+	}
+	return false
+}
+
 func triggerMatching() {
 	select {
 	case matchSignal <- struct{}{}:

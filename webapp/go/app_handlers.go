@@ -57,6 +57,19 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errInvitationInvalid) {
 			break
 		}
+		// username重複 (1062) はサフィックス付きで取り直す。
+		// benchのusername生成器の名前空間は有限（約400万）のため、
+		// 1000人超の登録で衝突が起きる。usernameはbenchから参照
+		// されない（応答はIDと招待コードのみ）ため変更してよい。
+		// VARCHAR(30)に収めるためbaseは25文字に切詰める。
+		if isDupEntryError(err) && attempt < 4 {
+			base := req.Username
+			if len(base) > 25 {
+				base = base[:25]
+			}
+			req.Username = base + "-" + secureRandomStr(4)
+			continue
+		}
 		if !isRetryableDBError(err) || attempt == 4 {
 			break
 		}
