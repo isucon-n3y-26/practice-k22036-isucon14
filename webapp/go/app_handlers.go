@@ -643,13 +643,7 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 
 	var paymentGatewayURL = paymentGatewayBaseURL
 
-	if err := requestPaymentGatewayPostPayment(ctx, paymentGatewayURL, paymentToken.Token, paymentGatewayRequest, func() ([]Ride, error) {
-		return rideRepository.ListByUserID(ctx, db, ride.UserID)
-	}); err != nil {
-		if errors.Is(err, erroredUpstream) {
-			writeError(w, http.StatusBadGateway, err)
-			return
-		}
+	if err := requestPaymentGatewayPostPayment(ctx, paymentGatewayURL, paymentToken.Token, paymentGatewayRequest, ride.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

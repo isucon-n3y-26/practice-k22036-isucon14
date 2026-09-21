@@ -4,13 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
 )
-
-var erroredUpstream = errors.New("errored upstream")
 
 // 決済GW専用クライアント。DefaultClientはhost毎idle2接続・タイムアウト無しで
 // 高並行時にTCP/TLSハンドシェイク連発＋ハング蓄積になるため、プールと上限を明示する。
@@ -28,12 +25,7 @@ type paymentGatewayPostPaymentRequest struct {
 	Amount int `json:"amount"`
 }
 
-type paymentGatewayGetPaymentsResponseOne struct {
-	Amount int    `json:"amount"`
-	Status string `json:"status"`
-}
-
-func requestPaymentGatewayPostPayment(ctx context.Context, paymentGatewayURL string, token string, param *paymentGatewayPostPaymentRequest, retrieveRidesOrderByCreatedAtAsc func() ([]Ride, error)) error {
+func requestPaymentGatewayPostPayment(ctx context.Context, paymentGatewayURL string, token string, param *paymentGatewayPostPaymentRequest, idempotencyKey string) error {
 	b, err := json.Marshal(param)
 	if err != nil {
 		return err
@@ -41,6 +33,9 @@ func requestPaymentGatewayPostPayment(ctx context.Context, paymentGatewayURL str
 
 	// 失敗したらとりあえずリトライ
 	// FIXME: 社内決済マイクロサービスのインフラに異常が発生していて、同時にたくさんリクエストすると変なことになる可能性あり
+	// Idempotency-Key により再送は冪等なため、件数突合せの確認GETは廃止した。
+	// 2xxは成功（204初回・200冪等リプレイ等の差異を吸収）、それ以外は再送して
+	// 尽きたらエラーにする。評価POSTのbench側再送も同一キーで冪等化される。
 	retry := 0
 	for {
 		err := func() error {
@@ -50,6 +45,10 @@ func requestPaymentGatewayPostPayment(ctx context.Context, paymentGatewayURL str
 			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Authorization", "Bearer "+token)
+			// 同一キーでの再送は冪等に扱われる。キーはライドID:
+			// 1ライド1課金で再送時も同一値のため、内側リトライ×5・
+			// 評価POSTのbench側再送のいずれでも二重課金にならない。
+			req.Header.Set("Idempotency-Key", idempotencyKey)
 
 			res, err := paymentHTTPClient.Do(req)
 			if err != nil {
@@ -57,39 +56,8 @@ func requestPaymentGatewayPostPayment(ctx context.Context, paymentGatewayURL str
 			}
 			defer res.Body.Close()
 
-			if res.StatusCode != http.StatusNoContent {
-				// エラーが返ってきても成功している場合があるので、社内決済マイクロサービスに問い合わせ
-				getReq, err := http.NewRequestWithContext(ctx, http.MethodGet, paymentGatewayURL+"/payments", bytes.NewBuffer([]byte{}))
-				if err != nil {
-					return err
-				}
-				getReq.Header.Set("Authorization", "Bearer "+token)
-
-			getRes, err := paymentHTTPClient.Do(getReq)
-			if err != nil {
-				return err
-			}
-			defer getRes.Body.Close()
-
-				// GET /payments は障害と関係なく200が返るので、200以外は回復不能なエラーとする
-				if getRes.StatusCode != http.StatusOK {
-					return fmt.Errorf("[GET /payments] unexpected status code (%d)", getRes.StatusCode)
-				}
-				var payments []paymentGatewayGetPaymentsResponseOne
-				if err := json.NewDecoder(getRes.Body).Decode(&payments); err != nil {
-					return err
-				}
-
-				rides, err := retrieveRidesOrderByCreatedAtAsc()
-				if err != nil {
-					return err
-				}
-
-				if len(rides) != len(payments) {
-					return fmt.Errorf("unexpected number of payments: %d != %d. %w", len(rides), len(payments), erroredUpstream)
-				}
-
-				return nil
+			if res.StatusCode < 200 || res.StatusCode >= 300 {
+				return fmt.Errorf("[POST /payments] unexpected status code (%d)", res.StatusCode)
 			}
 			return nil
 		}()

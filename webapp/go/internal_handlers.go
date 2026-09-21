@@ -213,6 +213,38 @@ func internalGetMatchDist(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// internalGetChairStates は ChairManager の全椅子状態をダンプする。
+// nearby不足（CODE=31）発生時の切分け用。読取り専用でbenchに影響なし。
+func internalGetChairStates(w http.ResponseWriter, r *http.Request) {
+	now := time.Now().UnixMilli()
+	type chairStateView struct {
+		ID         string `json:"id"`
+		Active     bool   `json:"active"`
+		HasLoc     bool   `json:"has_location"`
+		RideID     string `json:"ride_id"`
+		FreedAgoMs int64  `json:"freed_ago_ms"`
+		Lat        int    `json:"lat"`
+		Lon        int    `json:"lon"`
+	}
+	views := make([]chairStateView, 0, 2048)
+	for _, p := range globalChairManager.snapshot() {
+		st := p.Load()
+		if st == nil {
+			continue
+		}
+		views = append(views, chairStateView{
+			ID:         st.ID,
+			Active:     st.IsActive,
+			HasLoc:     st.HasLocation,
+			RideID:     st.CurrentRideID,
+			FreedAgoMs: now - st.FreedAt,
+			Lat:        st.Latitude,
+			Lon:        st.Longitude,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"chairs": views})
+}
+
 // このAPIをインスタンス内から一定間隔で叩かせることで、椅子とライドをマッチングさせる
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
