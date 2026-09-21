@@ -5,12 +5,59 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
 )
 
 var matchSignal = make(chan struct{}, 1)
+
+// maxMatchingDistanceBase は割当対象とする迎車地点までの距離の基本上限。
+// これを超える椅子は候補から外し、近傍の椅子が空くのを待つ。
+// 実測のマッチ距離分布を見て調整すること（GET /api/internal/match-dist）。
+const maxMatchingDistanceBase = 200
+
+// maxMatchingDistanceRelaxPerSec は待ち時間1秒あたりの上限緩和量。
+// 待てば上限が開くため、椅子が来ない地域のライドが永久に飢餓死しない。
+// 例: 10秒待ちで +300。bench側タイムアウト（30秒）より十分前に全開放される。
+const maxMatchingDistanceRelaxPerSec = 30
+
+// matchDistBuckets は割当成立時の迎車距離の度数分布。
+// 境界: [0]=50以下 [1]=100以下 [2]=200以下 [3]=400以下 [4]=800以下 [5]=超過。
+var matchDistBuckets [6]atomic.Uint64
+var matchDistTotal atomic.Uint64
+
+// matchSkippedByDistance は割当できずキューに残留した延べ件数
+// （空き椅子なし・距離上限による見送りの合計）。
+var matchSkippedByDistance atomic.Uint64
+
+func noteMatchDist(dist int) {
+	matchDistTotal.Add(1)
+	switch {
+	case dist <= 50:
+		matchDistBuckets[0].Add(1)
+	case dist <= 100:
+		matchDistBuckets[1].Add(1)
+	case dist <= 200:
+		matchDistBuckets[2].Add(1)
+	case dist <= 400:
+		matchDistBuckets[3].Add(1)
+	case dist <= 800:
+		matchDistBuckets[4].Add(1)
+	default:
+		matchDistBuckets[5].Add(1)
+	}
+}
+
+// matchingMaxDist はライドの待ち時間に応じた実効上限を返す。
+func matchingMaxDist(waited time.Duration) int {
+	relax := int(waited / time.Second)
+	if relax < 0 {
+		relax = 0
+	}
+	return maxMatchingDistanceBase + relax*maxMatchingDistanceRelaxPerSec
+}
 
 // isRetryableDBError は deadlock (1213) / lock wait timeout (1205) を
 // 検出し、トランザクション再試行の可否を返す。
@@ -98,13 +145,19 @@ func doMatching(ctx context.Context) (int, int, error) {
 
 	var assignedChairIDs []string
 	var assignedRideIDs []string
+	now := time.Now()
 	for _, ride := range rides {
-		// 2. メモリ上から最適な空き椅子を探索
-		matched, ok := globalChairManager.FindBestAvailableChair(ride.PickupLatitude, ride.PickupLongitude, ride.ID)
+		// 2. メモリ上から最適な空き椅子を探索。距離上限を超える場合は
+		// 見送り、キューに残して近傍の椅子が空くのを待つ。上限は
+		// 待ち時間に応じて緩むため、飢餓死はしない。
+		maxDist := matchingMaxDist(now.Sub(ride.CreatedAt))
+		matched, ok := globalChairManager.FindBestAvailableChair(ride.PickupLatitude, ride.PickupLongitude, ride.ID, maxDist)
 		if !ok {
-			// 空き椅子がない場合はキューに残して後続のライドを試す
+			// 空き椅子がない場合・上限内に候補がない場合はキューに残して後続のライドを試す
+			matchSkippedByDistance.Add(1)
 			continue
 		}
+		noteMatchDist(calculateDistance(ride.PickupLatitude, ride.PickupLongitude, matched.Latitude, matched.Longitude))
 		assignedChairIDs = append(assignedChairIDs, matched.ID)
 		assignedRideIDs = append(assignedRideIDs, ride.ID)
 
@@ -143,6 +196,21 @@ func doMatching(ctx context.Context) (int, int, error) {
 	}
 
 	return ridesCount, matchedCount, nil
+}
+
+// internalGetMatchDist は割当成立時の迎車距離の度数分布を返す。
+// 上限値の調整用。benchからの呼出しはなく診断専用。
+func internalGetMatchDist(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total":   matchDistTotal.Load(),
+		"skipped": matchSkippedByDistance.Load(),
+		"le_50":   matchDistBuckets[0].Load(),
+		"le_100":  matchDistBuckets[1].Load(),
+		"le_200":  matchDistBuckets[2].Load(),
+		"le_400":  matchDistBuckets[3].Load(),
+		"le_800":  matchDistBuckets[4].Load(),
+		"gt_800":  matchDistBuckets[5].Load(),
+	})
 }
 
 // このAPIをインスタンス内から一定間隔で叩かせることで、椅子とライドをマッチングさせる

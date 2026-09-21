@@ -326,6 +326,7 @@ func setup() http.Handler {
 	// internal handlers
 	{
 		mux.HandleFunc("GET /api/internal/matching", internalGetMatching)
+		mux.HandleFunc("GET /api/internal/match-dist", internalGetMatchDist)
 	}
 
 	// pprof は計測時のみ取得する。取得しない限りコストは発生しない。

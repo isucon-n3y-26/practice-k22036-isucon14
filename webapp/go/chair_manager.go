@@ -300,7 +300,9 @@ func (cm *ChairManager) UnassignRide(chairID string) {
 }
 
 // FindBestAvailableChair は利用可能な椅子の中で到着時間が最も短い椅子を選択し、即座に rideID を割り当てます
-func (cm *ChairManager) FindBestAvailableChair(pickupLat, pickupLon int, rideID string) (*ChairState, bool) {
+// 迎車地点までの距離が maxDist を超える椅子は候補から除外する（遠距離割当の見送り）。
+// 上限内に候補が無い場合は ok=false を返し、ライドはキューに残る。
+func (cm *ChairManager) FindBestAvailableChair(pickupLat, pickupLon int, rideID string, maxDist int) (*ChairState, bool) {
 	// 走査はロックフリーのスナップショットで行い、確定だけ stripe 下で
 	// 再検証＋割当てするため、同時実行に対して安全。最大3走査。
 	for attempt := 0; attempt < 3; attempt++ {
@@ -315,6 +317,9 @@ func (cm *ChairManager) FindBestAvailableChair(pickupLat, pickupLon int, rideID 
 				continue
 			}
 			dist := calculateDistance(pickupLat, pickupLon, st.Latitude, st.Longitude)
+			if dist > maxDist {
+				continue
+			}
 			estimatedTime := float64(dist) / float64(st.Speed)
 			if estimatedTime < bestTime || (estimatedTime == bestTime && dist < bestDistance) {
 				bestTime = estimatedTime
