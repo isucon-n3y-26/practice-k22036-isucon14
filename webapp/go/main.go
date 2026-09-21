@@ -403,6 +403,7 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	userRepository.ClearCache()
 	chairRepository.ClearCache()
 	ownerRepository.ClearCache()
+	paymentTokenRepository.ClearCache()
 	rideRepository.ClearCache()
 	globalDiscountCache.Clear()
 
