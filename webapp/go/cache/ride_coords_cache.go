@@ -52,6 +52,14 @@ func (c *RideCoordsCache) Get(ctx context.Context, rideID string) (RideCoords, e
 	return coords, nil
 }
 
+// Set は座標を先回り登録する。フィールド不変のため遅延load値と等価。
+// ライド作成パス（非クリティカル）からのseed用。Get内loadは残置する。
+func (c *RideCoordsCache) Set(coords RideCoords) {
+	c.mu.Lock()
+	c.m[coords.RideID] = coords
+	c.mu.Unlock()
+}
+
 // Clear はDB初期化時（全データ破棄時）に呼ぶこと。
 func (c *RideCoordsCache) Clear() {
 	c.mu.Lock()

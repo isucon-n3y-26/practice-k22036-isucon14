@@ -12,6 +12,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"github.com/isucon/isucon14/webapp/go/cache"
 	"github.com/isucon/isucon14/webapp/go/models"
 )
 
@@ -398,6 +399,16 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 	globalStatusLog.Append(matchingStatusID, rideID, "MATCHING", user.ID, "", time.Now())
 	WakeUser(user.ID)
 	globalStatusCache.Set(rideID, "MATCHING")
+	// 遷移判定用座標も先回り登録する。作成後不変のため遅延load値と等価で、
+	// 割当後初回POSTの同期的DB読みを消す（coordinateパス完全DBフリー化）。
+	globalRideCoordsCache.Set(cache.RideCoords{
+		RideID:               rideID,
+		UserID:               user.ID,
+		PickupLatitude:       req.PickupCoordinate.Latitude,
+		PickupLongitude:      req.PickupCoordinate.Longitude,
+		DestinationLatitude:   req.DestinationCoordinate.Latitude,
+		DestinationLongitude:  req.DestinationCoordinate.Longitude,
+	})
 
 	triggerMatching()
 
