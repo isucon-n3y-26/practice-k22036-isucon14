@@ -28,15 +28,18 @@ func TestMarkSentBulkSQL(t *testing.T) {
 		t.Fatalf("queries=%d, want 1", len(f.queries))
 	}
 	q := f.queries[0]
-	if !strings.HasPrefix(q, "UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id IN (?,?,?)") {
+	if !strings.HasPrefix(q, "UPDATE ride_statuses SET app_sent_at = ? WHERE id IN (?,?,?)") {
 		t.Fatalf("SQL形状が不正: %s", q)
 	}
 	if !strings.HasSuffix(q, "AND app_sent_at IS NULL") {
 		t.Fatalf("NULLガードが無い: %s", q)
 	}
-	// 引数はソート済み
+	// 引数は [時刻, ソート済みID...]
+	if len(f.args[0]) != 4 {
+		t.Fatalf("引数数が不正: %d", len(f.args[0]))
+	}
 	var got []string
-	for _, a := range f.args[0] {
+	for _, a := range f.args[0][1:] {
 		got = append(got, a.(string))
 	}
 	if len(got) != 3 || got[0] != "s1" || got[1] != "s2" || got[2] != "s3" {

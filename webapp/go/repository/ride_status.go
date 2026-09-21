@@ -133,8 +133,8 @@ func (r *RideStatusRepository) ListUnsentChairByChairID(ctx context.Context, q S
 func (r *RideStatusRepository) MarkAppSent(ctx context.Context, q Queryer, id string) error {
 	_, err := q.ExecContext(
 		ctx,
-		"UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ? AND app_sent_at IS NULL",
-		id,
+		"UPDATE ride_statuses SET app_sent_at = ? WHERE id = ? AND app_sent_at IS NULL",
+		time.Now(), id,
 	)
 	return err
 }
@@ -178,8 +178,8 @@ func (r *RideStatusRepository) ListUnsent(ctx context.Context, q Selecter) ([]Un
 func (r *RideStatusRepository) MarkChairSent(ctx context.Context, q Queryer, id string) error {
 	_, err := q.ExecContext(
 		ctx,
-		"UPDATE ride_statuses SET chair_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ? AND chair_sent_at IS NULL",
-		id,
+		"UPDATE ride_statuses SET chair_sent_at = ? WHERE id = ? AND chair_sent_at IS NULL",
+		time.Now(), id,
 	)
 	return err
 }
@@ -206,8 +206,10 @@ func markSentBulk(ctx context.Context, q Queryer, column string, ids []string) e
 	var sb strings.Builder
 	sb.WriteString("UPDATE ride_statuses SET ")
 	sb.WriteString(column)
-	sb.WriteString(" = CURRENT_TIMESTAMP(6) WHERE id IN (")
-	args := make([]any, 0, len(sorted))
+	sb.WriteString(" = ? WHERE id IN (")
+	args := make([]any, 0, len(sorted)+1)
+	// 文内では CURRENT_TIMESTAMP(6) と同様に単一時刻を使う
+	args = append(args, time.Now())
 	for i, id := range sorted {
 		if i > 0 {
 			sb.WriteString(",")

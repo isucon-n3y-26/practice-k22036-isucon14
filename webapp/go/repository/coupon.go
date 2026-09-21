@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"strconv"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
@@ -127,12 +129,15 @@ func (r *CouponRepository) CountByCodeForUpdate(ctx context.Context, q Selecter,
 }
 
 // CreateInvitationPair は招待クーポンと招待者Rewardを1文で付与する。
+// Rewardコード末尾のミリ秒サフィックスはGo側で生成する
+// （元は FLOOR(UNIX_TIMESTAMP(NOW(3))*1000) と等価）。
 func (r *CouponRepository) CreateInvitationPair(ctx context.Context, q Queryer, userID, invitationCode, inviterID string) error {
+	rewardCode := "RWD_" + invitationCode + "_" + strconv.FormatInt(time.Now().UnixMilli(), 10)
 	_, err := q.ExecContext(
 		ctx,
-		"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?), (?, CONCAT(?, '_', FLOOR(UNIX_TIMESTAMP(NOW(3))*1000)), ?)",
+		"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?), (?, ?, ?)",
 		userID, "INV_"+invitationCode, 1500,
-		inviterID, "RWD_"+invitationCode, 1000,
+		inviterID, rewardCode, 1000,
 	)
 	return err
 }
