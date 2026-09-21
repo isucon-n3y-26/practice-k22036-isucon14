@@ -514,6 +514,10 @@ func insertRideTx(ctx context.Context, user *User, req *appPostRidesRequest) (ri
 		return "", "", 0, err
 	}
 
+	// クーポン確定はこのTX内のみで以後不変のため、割引額を記録する。
+	// 未確定時 coupon はゼロ値で割引0が正しい値として入る。
+	globalDiscountCache.Set(rideID, coupon.Discount)
+
 	return rideID, matchingStatusID, fare, nil
 }
 
@@ -691,6 +695,9 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 評価確定行でライドキャッシュを更新する（再取得済みの正確な行）。
+	rideRepository.SetCache(ride)
+
 	// 評価確定で履歴が増えるためキャッシュを無効化する（コミット後）。
 	globalHistoryCache.Invalidate(ride.UserID)
 
@@ -783,7 +790,9 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 			return ride, status, nil
 		},
 		func(ctx context.Context, rideID string) (*Ride, error) {
-			return rideRepository.GetByID(ctx, db, rideID)
+			// イベント毎のライド取得は read-through で賄う。
+			// 変化点（割当・評価）では無効化/更新されるため等価。
+			return rideRepository.GetByIDCached(ctx, rideID)
 		},
 		func(ctx context.Context, ride *Ride, status string) (any, error) {
 			return buildAppNotificationData(ctx, db, user.ID, ride, status)
@@ -822,7 +831,8 @@ func buildAppNotificationData(ctx context.Context, q queryGetter, userID string,
 	}
 
 	if ride.ChairID.Valid {
-		chair, err := chairRepository.GetByID(ctx, q, ride.ChairID.String)
+		// 通知に使う椅子名/モデルは不変のためキャッシュ参照と等価。
+		chair, err := chairRepository.GetByIDCached(ctx, ride.ChairID.String)
 		if err != nil {
 			return nil, err
 		}
@@ -923,14 +933,13 @@ func calculateDiscountedFare(ctx context.Context, q queryGetter, userID string, 
 		pickupLatitude = ride.PickupLatitude
 		pickupLongitude = ride.PickupLongitude
 
-		// すでにクーポンが紐づいているならそれの割引額を参照
-		if coupon, err := couponRepository.GetByUsedBy(ctx, q, ride.ID); err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				return 0, err
-			}
-		} else {
-			discount = coupon.Discount
+		// すでにクーポンが紐づいているならそれの割引額を参照。
+		// 割引は配車要求TXで確定後不変のためキャッシュ参照と等価。
+		d, err := globalDiscountCache.Get(ctx, ride.ID)
+		if err != nil {
+			return 0, err
 		}
+		discount = d
 	} else {
 		// 初回利用クーポンを最優先で使う
 		if coupon, err := couponRepository.GetUnusedNewUserCoupon(ctx, q, userID); err != nil {

@@ -280,7 +280,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 			return ride, status, nil
 		},
 		func(ctx context.Context, rideID string) (*Ride, error) {
-			return rideRepository.GetByID(ctx, db, rideID)
+			return rideRepository.GetByIDCached(ctx, rideID)
 		},
 		func(ctx context.Context, ride *Ride, status string) (any, error) {
 			return buildChairNotificationData(ctx, ride, status)

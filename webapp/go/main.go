@@ -403,6 +403,8 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	userRepository.ClearCache()
 	chairRepository.ClearCache()
 	ownerRepository.ClearCache()
+	rideRepository.ClearCache()
+	globalDiscountCache.Clear()
 
 	// キューに積まれていない未割当MATCHINGライドを救済登録する
 	// （通常は空のはずだが、再起動時などの取りこぼし対策）

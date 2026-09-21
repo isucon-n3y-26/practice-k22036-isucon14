@@ -188,6 +188,12 @@ func doMatching(ctx context.Context) (int, int, error) {
 		return ridesCount, matchedCount, err
 	}
 
+	// chair_id が変化したためライドキャッシュを破棄する。
+	// 次回通知取得で最新行を読み直すため stale は起きない。
+	for _, rid := range assignedRideIDs {
+		rideRepository.InvalidateCache(rid)
+	}
+
 	// 割当により椅子向けSSEで可視になったMATCHINGを通知する
 	// 未送信ログの配送先設定は wake より先に行う
 	for i, cid := range assignedChairIDs {

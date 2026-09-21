@@ -191,6 +191,21 @@ func (r *ChairRepository) GetByID(ctx context.Context, q Getter, chairID string)
 	return chair, nil
 }
 
+// GetByIDCached は通知ペイロード組立用の read-through。
+// 通知に使う ID/Name/Model は不変のためキャッシュして等価。
+// is_active の読手は ChairManager 側のため対象外。
+func (r *ChairRepository) GetByIDCached(ctx context.Context, chairID string) (*models.Chair, error) {
+	if v, ok := r.cache.Load("id:"+chairID); ok {
+		return v.(*models.Chair), nil
+	}
+	chair, err := r.GetByID(ctx, r.db, chairID)
+	if err != nil {
+		return nil, err
+	}
+	r.cache.Store("id:"+chairID, chair)
+	return chair, nil
+}
+
 // GetByAccessToken はトークン不変のためキャッシュする。認証ミドルウェアの都度SELECT排除用。
 func (r *ChairRepository) GetByAccessToken(ctx context.Context, accessToken string) (*models.Chair, error) {
 	if v, ok := r.cache.Load(accessToken); ok {
@@ -201,6 +216,7 @@ func (r *ChairRepository) GetByAccessToken(ctx context.Context, accessToken stri
 		return nil, err
 	}
 	r.cache.Store(accessToken, chair)
+	r.cache.Store("id:"+chair.ID, chair)
 	return chair, nil
 }
 

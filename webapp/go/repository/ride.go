@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -11,6 +12,10 @@ import (
 
 type RideRepository struct {
 	db *sqlx.DB
+	// cache は通知ペイロード組立用の read-through。
+	// rides行は chair_id（割当時）と evaluation（評価時）のみ変化するため、
+	// 両コミット点で Invalidate/Set する。TX内の厳密読手は直接 GetByID を使う。
+	cache sync.Map
 }
 
 func NewRideRepository(db *sqlx.DB) *RideRepository {
@@ -37,6 +42,37 @@ func (r *RideRepository) GetByID(ctx context.Context, q Getter, rideID string) (
 		return nil, err
 	}
 	return ride, nil
+}
+
+// GetByIDCached は通知SSEのイベント毎取得用 read-through。
+// 初回のみDBを叩き、以後はメモリから返す。unk ChairID/evaluation の
+// 変化点では呼出し側が Invalidate/Set するため等価。
+func (r *RideRepository) GetByIDCached(ctx context.Context, rideID string) (*models.Ride, error) {
+	if v, ok := r.cache.Load(rideID); ok {
+		return v.(*models.Ride), nil
+	}
+	ride, err := r.GetByID(ctx, r.db, rideID)
+	if err != nil {
+		return nil, err
+	}
+	r.cache.Store(rideID, ride)
+	return ride, nil
+}
+
+// SetCache は評価確定時の再取得行でキャッシュを更新する。
+func (r *RideRepository) SetCache(ride *models.Ride) {
+	r.cache.Store(ride.ID, ride)
+}
+
+// InvalidateCache は割当（chair_id変化）時にエントリを破棄する。
+// 次回取得で最新行を読み直すため stale は起きない。
+func (r *RideRepository) InvalidateCache(rideID string) {
+	r.cache.Delete(rideID)
+}
+
+// ClearCache はキャッシュを破棄する。初期化でDBが全消去されるため。
+func (r *RideRepository) ClearCache() {
+	r.cache = sync.Map{}
 }
 
 // ListIncompleteRides は最新状態がCOMPLETEDでない割当済みライドを返す。
