@@ -89,6 +89,16 @@ remote() {
 printf '\n==> Truncating slow query log on %s\n' "${TARGET}"
 remote "sudo truncate -s 0 ${SLOW_QUERY_LOG_PATH}"
 
+# Edge (contestant-03) の nginx ログもリセットする。combinedログは
+# 1走行で数GBに膨らみ、放置するとディスクフルで末尾行が欠損する
+# （alp が unexpected end of JSON input で失敗。2026-09-21に発生）。
+# truncate後に reopen してfdオフセットを戻す（スパース化防止）。
+# edge以外にnginxは無いため対象外。
+if [ "${TARGET}" = "contestant-03" ]; then
+  printf '\n==> Truncating nginx access logs on %s\n' "${TARGET}"
+  remote "sudo truncate -s 0 /var/log/nginx/access.log /var/log/nginx/access.json.log && sudo nginx -s reopen"
+fi
+
 printf '\n==> Starting benchmark task for %s\n' "${TARGET}"
 RUN_TASK_OUTPUT="$(sh -c "${RUN_TASK_CMD}")"
 

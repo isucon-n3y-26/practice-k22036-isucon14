@@ -68,9 +68,9 @@ remote() {
 
 # ------------------------------------------------------------------------------
 # 2. アクセスログのリセット
+#    （実処理は run_benchmark.sh が全フロー共通で行う。ここでは触らない）
 # ------------------------------------------------------------------------------
-printf '\n==> Truncating %s on %s\n' "${ACCESS_LOG}" "${TARGET}"
-remote "sudo truncate -s 0 ${ACCESS_LOG} && sudo chown syslog:adm ${ACCESS_LOG}"
+printf '\n==> Access log reset is handled by run_benchmark.sh\n'
 
 # ------------------------------------------------------------------------------
 # 3. ベンチマーク実行（Fargate）
