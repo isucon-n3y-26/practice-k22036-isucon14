@@ -224,16 +224,3 @@ func (r *RideRepository) CountByUserID(ctx context.Context, q Getter, userID str
 	}
 	return count, nil
 }
-
-// ListByUserID はユーザーのライドを作成昇順で返す。
-// 決済リトライ時の件数照合用で、評価の書込み前後で内容は不変のためTX外で読める。
-func (r *RideRepository) ListByUserID(ctx context.Context, q Selecter, userID string) ([]models.Ride, error) {
-	rides := []models.Ride{}
-	if err := q.SelectContext(ctx, &rides,
-		`SELECT * FROM rides WHERE user_id = ? ORDER BY created_at ASC`,
-		userID,
-	); err != nil {
-		return nil, err
-	}
-	return rides, nil
-}
